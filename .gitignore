@@ -1,2 +1,5 @@
 # Ignore local .dotnet SDK folder
 /.dotnet/
+# Ignore SuperSelect.App/bin
+/SuperSelect.App/bin/
+/SuperSelect.App/obj/

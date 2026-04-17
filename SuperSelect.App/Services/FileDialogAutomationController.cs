@@ -1,4 +1,5 @@
 using System.IO;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Automation;
 using SuperSelect.App.Models;
@@ -10,6 +11,8 @@ internal sealed class FileDialogAutomationController
 {
     private static readonly string[] FileNameKeywords = ["file name", "filename", "文件名"];
     private static readonly string[] ConfirmKeywords = ["open", "save", "select", "打开", "保存", "选择"];
+    private static readonly string[] FileTypeKeywords = ["file type", "save as type", "类型", "文件类型", "保存类型"];
+    private static readonly Regex ExtensionRegex = new(@"\*\.[a-zA-Z0-9]+|\.[a-zA-Z0-9]+", RegexOptions.Compiled);
 
     private readonly IntPtr _dialogHwnd;
 
@@ -146,6 +149,18 @@ internal sealed class FileDialogAutomationController
         }
 
         return TryInvoke(confirm);
+    }
+
+    public IReadOnlySet<string> GetAllowedFileExtensions()
+    {
+        var root = TryGetRoot();
+        if (root is null)
+        {
+            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        var filterText = TryReadFileTypeFilterText(root);
+        return ParseExtensions(filterText);
     }
 
     private void TryActivateDialog()
@@ -297,5 +312,139 @@ internal sealed class FileDialogAutomationController
         }
 
         return false;
+    }
+
+    private static string? TryReadFileTypeFilterText(AutomationElement root)
+    {
+        var byId = root.FindFirst(
+            TreeScope.Descendants,
+            new AndCondition(
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ComboBox),
+                new PropertyCondition(AutomationElement.AutomationIdProperty, "1136")));
+
+        if (byId is not null)
+        {
+            var fromId = GetComboDisplayText(byId);
+            if (!string.IsNullOrWhiteSpace(fromId))
+            {
+                return fromId;
+            }
+        }
+
+        var combos = root.FindAll(
+            TreeScope.Descendants,
+            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ComboBox));
+
+        for (var i = 0; i < combos.Count; i++)
+        {
+            var combo = combos[i];
+            var name = combo.Current.Name;
+            if (!string.IsNullOrWhiteSpace(name) && ContainsAny(name, FileTypeKeywords))
+            {
+                var fromNamedCombo = GetComboDisplayText(combo);
+                if (!string.IsNullOrWhiteSpace(fromNamedCombo))
+                {
+                    return fromNamedCombo;
+                }
+            }
+        }
+
+        for (var i = 0; i < combos.Count; i++)
+        {
+            var any = GetComboDisplayText(combos[i]);
+            if (!string.IsNullOrWhiteSpace(any) && any.Contains("*.", StringComparison.OrdinalIgnoreCase))
+            {
+                return any;
+            }
+        }
+
+        return null;
+    }
+
+    private static string? GetComboDisplayText(AutomationElement combo)
+    {
+        try
+        {
+            if (combo.TryGetCurrentPattern(SelectionPattern.Pattern, out var selectionObj) &&
+                selectionObj is SelectionPattern selectionPattern)
+            {
+                var selected = selectionPattern.Current.GetSelection();
+                if (selected.Length > 0)
+                {
+                    var selectedName = selected[0].Current.Name;
+                    if (!string.IsNullOrWhiteSpace(selectedName))
+                    {
+                        return selectedName;
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Ignore and continue.
+        }
+
+        try
+        {
+            var textElement = combo.FindFirst(
+                TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text));
+
+            if (textElement is not null && !string.IsNullOrWhiteSpace(textElement.Current.Name))
+            {
+                return textElement.Current.Name;
+            }
+        }
+        catch
+        {
+            // Ignore and continue.
+        }
+
+        return combo.Current.Name;
+    }
+
+    private static IReadOnlySet<string> ParseExtensions(string? filterText)
+    {
+        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(filterText))
+        {
+            return result;
+        }
+
+        if (filterText.Contains("*.*", StringComparison.OrdinalIgnoreCase) ||
+            filterText.Contains("all files", StringComparison.OrdinalIgnoreCase) ||
+            filterText.Contains("所有文件", StringComparison.OrdinalIgnoreCase))
+        {
+            return result;
+        }
+
+        var matches = ExtensionRegex.Matches(filterText);
+        foreach (Match match in matches)
+        {
+            var token = match.Value.Trim();
+            if (token.StartsWith("*", StringComparison.Ordinal))
+            {
+                token = token[1..];
+            }
+
+            if (!token.StartsWith(".", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            token = token.TrimEnd(')', ';', ',', ' ');
+            if (token.Length <= 1)
+            {
+                continue;
+            }
+
+            var extBody = token[1..];
+            if (extBody.All(char.IsLetterOrDigit))
+            {
+                result.Add(token.ToLowerInvariant());
+            }
+        }
+
+        return result;
     }
 }

@@ -153,6 +153,10 @@
                                   Style="{StaticResource IconToggleButtonStyle}"
                                   ToolTip="资源管理器路径"
                                   Click="ExplorerModeButton_OnClick">&#xE838;</ToggleButton>
+                    <ToggleButton x:Name="TypeFilterButton"
+                                  Style="{StaticResource IconToggleButtonStyle}"
+                                  ToolTip="按文件类型过滤"
+                                  Click="TypeFilterButton_OnClick">&#xE71C;</ToggleButton>
 
                     <Button x:Name="SortButton"
                             Style="{StaticResource IconButtonStyle}"

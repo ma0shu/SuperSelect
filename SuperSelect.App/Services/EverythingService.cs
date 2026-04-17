@@ -49,11 +49,12 @@ internal sealed class EverythingService
     }
 
     public Task<IReadOnlyList<FileCandidate>> RecentFilesAsync(
+        EverythingSortOption sortOption,
         int maxResults,
         CancellationToken cancellationToken)
     {
         return Task.Run(
-            () => QueryInternal("file:", EverythingSort.DateModifiedDescending, maxResults, CandidateSource.EverythingRecent, cancellationToken),
+            () => QueryInternal("file:", ToEverythingSort(sortOption), maxResults, CandidateSource.EverythingRecent, cancellationToken),
             cancellationToken);
     }
 

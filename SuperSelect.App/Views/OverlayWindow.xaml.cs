@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -33,6 +34,7 @@ public partial class OverlayWindow : Window
     private bool _suppressSingleSelect;
     private OverlayMode _currentMode = OverlayMode.Search;
     private int _sortIndex;
+    private bool _fileTypeFilterEnabled;
 
     internal OverlayWindow(
         EverythingService everythingService,
@@ -128,6 +130,8 @@ public partial class OverlayWindow : Window
         }
 
         IReadOnlyList<FileCandidate> items = [];
+        var statusMessage = string.Empty;
+        var canApplyDialogTypeFilter = true;
 
         try
         {
@@ -137,37 +141,40 @@ public partial class OverlayWindow : Window
                     items = await _everythingService.SearchFilesAsync(keyword, sort, 180, token);
                     if (!_everythingService.IsAvailable)
                     {
-                        SetStatus($"Everything 不可用：{_everythingService.LastErrorMessage}");
+                        statusMessage = $"Everything 不可用：{_everythingService.LastErrorMessage}";
+                        canApplyDialogTypeFilter = false;
                     }
                     else
                     {
-                        SetStatus(items.Count == 0 ? "没有搜索结果。" : $"搜索结果：{items.Count} 条。");
+                        statusMessage = items.Count == 0 ? "没有搜索结果。" : $"搜索结果：{items.Count} 条。";
                     }
 
                     break;
                 case OverlayMode.Recent:
-                    items = await _everythingService.RecentFilesAsync(180, token);
+                    items = await _everythingService.RecentFilesAsync(sort, 180, token);
                     if (!_everythingService.IsAvailable)
                     {
-                        SetStatus($"Everything 不可用：{_everythingService.LastErrorMessage}");
+                        statusMessage = $"Everything 不可用：{_everythingService.LastErrorMessage}";
+                        canApplyDialogTypeFilter = false;
                     }
                     else
                     {
-                        SetStatus(items.Count == 0 ? "没有最近文件结果。" : $"最近文件：{items.Count} 条。");
+                        statusMessage = items.Count == 0 ? "没有最近文件结果。" : $"最近文件：{items.Count} 条。";
                     }
 
                     break;
                 case OverlayMode.Tray:
                     items = _trayRepository.Query(keyword);
-                    SetStatus(items.Count == 0
+                    statusMessage = items.Count == 0
                         ? "托盘为空，可直接把文件拖进面板。"
-                        : $"托盘文件：{items.Count} 条。");
+                        : $"托盘文件：{items.Count} 条。";
                     break;
                 case OverlayMode.Explorer:
                     items = _explorerWindowService.GetOpenLocations(string.Empty);
-                    SetStatus(items.Count == 0
+                    statusMessage = items.Count == 0
                         ? "未检测到可用资源管理器路径。"
-                        : $"资源管理器路径：{items.Count} 条。");
+                        : $"资源管理器路径：{items.Count} 条。";
+                    canApplyDialogTypeFilter = false;
                     break;
             }
         }
@@ -179,6 +186,35 @@ public partial class OverlayWindow : Window
         if (token.IsCancellationRequested)
         {
             return;
+        }
+
+        if (_fileTypeFilterEnabled && canApplyDialogTypeFilter)
+        {
+            var allowedExtensions = _dialogController.GetAllowedFileExtensions();
+            if (allowedExtensions.Count > 0)
+            {
+                items = items
+                    .Where(candidate => candidate.IsDirectory || HasAllowedExtension(candidate.FullPath, allowedExtensions))
+                    .ToList();
+
+                var caption = _currentMode switch
+                {
+                    OverlayMode.Search => "搜索",
+                    OverlayMode.Recent => "最近",
+                    OverlayMode.Tray => "托盘",
+                    _ => "结果",
+                };
+                statusMessage = $"{caption}结果：{items.Count} 条（类型过滤）";
+            }
+            else if (!string.IsNullOrWhiteSpace(statusMessage))
+            {
+                statusMessage = $"{statusMessage}（当前类型=全部）";
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(statusMessage))
+        {
+            SetStatus(statusMessage);
         }
 
         UpdateItems(items);
@@ -405,7 +441,7 @@ public partial class OverlayWindow : Window
         _sortIndex = (_sortIndex + 1) % _sortOptions.Count;
         UpdateSortButtonLabel();
 
-        if (_currentMode == OverlayMode.Search)
+        if (_currentMode is OverlayMode.Search or OverlayMode.Recent or OverlayMode.Tray)
         {
             _searchDebounceTimer.Stop();
             _ = RefreshCandidatesAsync(immediate: true);
@@ -432,12 +468,22 @@ public partial class OverlayWindow : Window
         RecentModeButton.IsChecked = _currentMode == OverlayMode.Recent;
         TrayModeButton.IsChecked = _currentMode == OverlayMode.Tray;
         ExplorerModeButton.IsChecked = _currentMode == OverlayMode.Explorer;
-        SortButton.IsEnabled = _currentMode == OverlayMode.Search;
+        TypeFilterButton.IsChecked = _fileTypeFilterEnabled;
+        SortButton.IsEnabled = true;
     }
 
     private void UpdateSortButtonLabel()
     {
         SortLabelText.Text = _sortOptions[_sortIndex].Label;
+    }
+
+    private void TypeFilterButton_OnClick(object sender, RoutedEventArgs e)
+    {
+        _fileTypeFilterEnabled = !_fileTypeFilterEnabled;
+        ApplyModeUiState();
+
+        _searchDebounceTimer.Stop();
+        _ = RefreshCandidatesAsync(immediate: true);
     }
 
     private async void Window_OnPreviewDrop(object sender, DragEventArgs e)
@@ -531,5 +577,16 @@ public partial class OverlayWindow : Window
         return NativeMethods.GetMonitorInfo(monitor, ref info)
             ? info.rcWork
             : fallback;
+    }
+
+    private static bool HasAllowedExtension(string fullPath, IReadOnlySet<string> allowedExtensions)
+    {
+        var extension = Path.GetExtension(fullPath);
+        if (string.IsNullOrWhiteSpace(extension))
+        {
+            return false;
+        }
+
+        return allowedExtensions.Contains(extension.ToLowerInvariant());
     }
 }
