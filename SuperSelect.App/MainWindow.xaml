@@ -1,0 +1,53 @@
+<Window x:Class="SuperSelect.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        Title="SuperSelect"
+        Height="420"
+        Width="680"
+        MinHeight="360"
+        MinWidth="560">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock x:Name="HookStatusText"
+                   FontWeight="SemiBold"
+                   FontSize="15" />
+
+        <TextBlock Grid.Row="1"
+                   Margin="0,8,0,12"
+                   TextWrapping="Wrap"
+                   Text="运行后会监听系统文件对话框，并在对话框下方弹出一行快速面板。面板支持 Everything 搜索、最近文件、托盘文件和资源管理器路径跳转。" />
+
+        <GroupBox Grid.Row="2" Header="文件托盘">
+            <DockPanel Margin="8">
+                <StackPanel DockPanel.Dock="Bottom"
+                            Orientation="Horizontal"
+                            HorizontalAlignment="Right"
+                            Margin="0,10,0,0">
+                    <Button Width="96"
+                            Margin="0,0,8,0"
+                            Click="RefreshButton_OnClick">刷新</Button>
+                    <Button Width="96"
+                            Margin="0,0,8,0"
+                            Click="RemoveButton_OnClick">移除选中</Button>
+                    <Button Width="96"
+                            Click="ClearButton_OnClick">清空托盘</Button>
+                </StackPanel>
+                <ListBox x:Name="TrayList" />
+            </DockPanel>
+        </GroupBox>
+
+        <TextBlock Grid.Row="3"
+                   Margin="0,10,0,0"
+                   x:Name="EverythingStatusText"
+                   Foreground="#475569" />
+    </Grid>
+</Window>

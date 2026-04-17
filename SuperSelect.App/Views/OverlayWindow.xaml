@@ -1,0 +1,225 @@
+<Window x:Class="SuperSelect.App.Views.OverlayWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        ShowInTaskbar="False"
+        Topmost="True"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        AllowsTransparency="True"
+        AllowDrop="True"
+        Background="Transparent"
+        Width="900"
+        Height="108"
+        MinWidth="560"
+        MinHeight="108"
+        PreviewDragOver="Window_OnPreviewDragOver"
+        PreviewDrop="Window_OnPreviewDrop">
+    <Window.Resources>
+        <Style x:Key="IconToggleButtonStyle" TargetType="ToggleButton">
+            <Setter Property="Width" Value="34" />
+            <Setter Property="Height" Value="30" />
+            <Setter Property="Margin" Value="6,0,0,0" />
+            <Setter Property="FontFamily" Value="Segoe Fluent Icons" />
+            <Setter Property="FontSize" Value="15" />
+            <Setter Property="Foreground" Value="#475569" />
+            <Setter Property="Background" Value="#F1F5F9" />
+            <Setter Property="BorderBrush" Value="#CBD5E1" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="Host"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="8">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Host" Property="Background" Value="#E2E8F0" />
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Host" Property="Background" Value="#DBEAFE" />
+                                <Setter TargetName="Host" Property="BorderBrush" Value="#60A5FA" />
+                                <Setter Property="Foreground" Value="#1D4ED8" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="IconButtonStyle" TargetType="Button">
+            <Setter Property="Height" Value="30" />
+            <Setter Property="MinWidth" Value="92" />
+            <Setter Property="Margin" Value="6,0,0,0" />
+            <Setter Property="Foreground" Value="#334155" />
+            <Setter Property="Background" Value="#F1F5F9" />
+            <Setter Property="BorderBrush" Value="#CBD5E1" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Host"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="8"
+                                Padding="8,0">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Host" Property="Background" Value="#E2E8F0" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Border x:Name="RootBorder"
+            Margin="6"
+            CornerRadius="14"
+            BorderThickness="1"
+            BorderBrush="#BFD1E6"
+            Padding="12,10"
+            AllowDrop="True">
+        <Border.Background>
+            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                <GradientStop Color="#FBFDFF" Offset="0" />
+                <GradientStop Color="#F1F5F9" Offset="1" />
+            </LinearGradientBrush>
+        </Border.Background>
+        <Border.Effect>
+            <DropShadowEffect Color="#44000000"
+                              BlurRadius="24"
+                              ShadowDepth="0"
+                              Opacity="0.35" />
+        </Border.Effect>
+
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <Border Grid.Column="0"
+                        Height="32"
+                        CornerRadius="10"
+                        BorderThickness="1"
+                        BorderBrush="#BFD1E6"
+                        Background="#FFFFFF">
+                    <TextBox x:Name="SearchBox"
+                             Padding="11,5"
+                             VerticalContentAlignment="Center"
+                             BorderThickness="0"
+                             Background="Transparent"
+                             TextChanged="SearchBox_OnTextChanged"
+                             KeyDown="SearchBox_OnKeyDown" />
+                </Border>
+
+                <StackPanel Grid.Column="1"
+                            Orientation="Horizontal"
+                            Margin="8,0,0,0"
+                            VerticalAlignment="Center">
+                    <ToggleButton x:Name="SearchModeButton"
+                                  Style="{StaticResource IconToggleButtonStyle}"
+                                  ToolTip="搜索模式"
+                                  Click="SearchModeButton_OnClick">&#xE721;</ToggleButton>
+                    <ToggleButton x:Name="RecentModeButton"
+                                  Style="{StaticResource IconToggleButtonStyle}"
+                                  ToolTip="最近文件"
+                                  Click="RecentModeButton_OnClick">&#xE823;</ToggleButton>
+                    <ToggleButton x:Name="TrayModeButton"
+                                  Style="{StaticResource IconToggleButtonStyle}"
+                                  ToolTip="托盘文件"
+                                  Click="TrayModeButton_OnClick">&#xE7BC;</ToggleButton>
+                    <ToggleButton x:Name="ExplorerModeButton"
+                                  Style="{StaticResource IconToggleButtonStyle}"
+                                  ToolTip="资源管理器路径"
+                                  Click="ExplorerModeButton_OnClick">&#xE838;</ToggleButton>
+
+                    <Button x:Name="SortButton"
+                            Style="{StaticResource IconButtonStyle}"
+                            ToolTip="点击切换搜索排序"
+                            Click="SortButton_OnClick">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <TextBlock FontFamily="Segoe Fluent Icons"
+                                       Text="&#xE8D1;"
+                                       VerticalAlignment="Center" />
+                            <TextBlock x:Name="SortLabelText"
+                                       Margin="5,0,0,0"
+                                       VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+            </Grid>
+
+            <TextBlock x:Name="StatusText"
+                       Grid.Row="1"
+                       Margin="2,8,2,0"
+                       FontSize="12"
+                       Foreground="#5B6B7F"
+                       Text="输入关键字搜索，或拖文件到此面板加入托盘。"
+                       TextTrimming="CharacterEllipsis" />
+
+            <Border x:Name="ResultHost"
+                    Grid.Row="2"
+                    Margin="0,8,0,0"
+                    Height="236"
+                    MinHeight="96"
+                    CornerRadius="10"
+                    BorderBrush="#C9D7E8"
+                    BorderThickness="1"
+                    Background="#FFFFFF"
+                    Visibility="Collapsed">
+                <ListBox x:Name="ResultList"
+                         Margin="2"
+                         BorderThickness="0"
+                         SelectionChanged="ResultList_OnSelectionChanged"
+                         MouseDoubleClick="ResultList_OnMouseDoubleClick"
+                         KeyDown="ResultList_OnKeyDown">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel Margin="4">
+                                <DockPanel>
+                                    <Border DockPanel.Dock="Right"
+                                            CornerRadius="4"
+                                            Background="#E2E8F0"
+                                            Padding="6,1"
+                                            Margin="8,0,0,0">
+                                        <TextBlock Text="{Binding SourceLabel}"
+                                                   FontSize="11"
+                                                   Foreground="#334155" />
+                                    </Border>
+                                    <TextBlock Text="{Binding DisplayName}"
+                                               FontWeight="SemiBold"
+                                               TextTrimming="CharacterEllipsis" />
+                                </DockPanel>
+                                <TextBlock Text="{Binding SecondaryText}"
+                                           FontSize="12"
+                                           Foreground="#64748B"
+                                           TextTrimming="CharacterEllipsis" />
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </Border>
+        </Grid>
+    </Border>
+</Window>

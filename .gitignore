@@ -1,0 +1,2 @@
+# Ignore local .dotnet SDK folder
+/.dotnet/
