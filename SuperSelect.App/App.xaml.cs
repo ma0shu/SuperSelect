@@ -21,6 +21,8 @@ public partial class App : System.Windows.Application
     private ExplorerWindowService? _explorerWindowService;
     private UserPreferencesRepository? _preferencesRepository;
     private DateTime _lastMemoryTrimUtc = DateTime.MinValue;
+    private static readonly TimeSpan MemoryTrimCooldown = TimeSpan.FromMinutes(2);
+    private const long MemoryTrimManagedThresholdBytes = 64L * 1024 * 1024;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -221,7 +223,12 @@ public partial class App : System.Windows.Application
         }
 
         var nowUtc = DateTime.UtcNow;
-        if (nowUtc - _lastMemoryTrimUtc < TimeSpan.FromSeconds(10))
+        if (nowUtc - _lastMemoryTrimUtc < MemoryTrimCooldown)
+        {
+            return;
+        }
+
+        if (GC.GetTotalMemory(forceFullCollection: false) < MemoryTrimManagedThresholdBytes)
         {
             return;
         }
@@ -234,11 +241,7 @@ public partial class App : System.Windows.Application
     {
         try
         {
-            System.Runtime.GCSettings.LargeObjectHeapCompactionMode =
-                System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive, blocking: true, compacting: true);
-            GC.WaitForPendingFinalizers();
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Optimized, blocking: false, compacting: false);
 
             _ = Native.NativeMethods.EmptyWorkingSet(Native.NativeMethods.GetCurrentProcess());
             AppLogger.LogInfo($"Background memory trim executed: {reason}");

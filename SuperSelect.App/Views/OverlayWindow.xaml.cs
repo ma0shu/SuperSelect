@@ -29,6 +29,9 @@ public partial class OverlayWindow : Window
     private const int DisplayResultLimit = 400;
     private const int TypeFilterScanPageSize = 2000;
     private const int AutomationActionTimeoutMs = 900;
+    private static readonly TimeSpan DialogMonitorBusyInterval = TimeSpan.FromMilliseconds(380);
+    private static readonly TimeSpan DialogMonitorIdleInterval = TimeSpan.FromMilliseconds(760);
+    private static readonly TimeSpan DialogMonitorTimeout = TimeSpan.FromMilliseconds(260);
 
     private readonly EverythingService _everythingService;
     private readonly TrayRepository _trayRepository;
@@ -84,10 +87,7 @@ public partial class OverlayWindow : Window
             Interval = TimeSpan.FromMilliseconds(180),
         };
         _searchDebounceTimer.Tick += SearchDebounceTimer_OnTick;
-        _dialogMonitorTimer = new DispatcherTimer
-        {
-            Interval = TimeSpan.FromMilliseconds(420),
-        };
+        _dialogMonitorTimer = new DispatcherTimer();
         _dialogMonitorTimer.Tick += DialogMonitorTimer_OnTick;
 
         ResultList.ItemsSource = _items;
@@ -102,20 +102,30 @@ public partial class OverlayWindow : Window
         _dialogHwnd = dialogHwnd;
         _dialogController = new FileDialogAutomationController(dialogHwnd);
         Interlocked.Increment(ref _singleSelectVersion);
-        
-        Task.Run(() =>
+
+        var controller = _dialogController;
+        if (controller is not null)
         {
-            var isFolder = _dialogController.IsFolderSelectionDialog();
-            var filter = _dialogController.GetCurrentFileTypeFilterText();
-            _ = Dispatcher.BeginInvoke(new Action(() =>
+            _ = Task.Run(() =>
             {
-                if (_dialogHwnd != dialogHwnd) return;
-                _isFolderDialog = isFolder;
-                _lastFileTypeFilterText = filter;
-                ApplyModeUiState();
-                _ = RefreshCandidatesAsync(immediate: true);
-            }));
-        });
+                var snapshot = CaptureDialogSnapshot(
+                    controller,
+                    includeFilterText: true,
+                    fallbackFilterText: string.Empty);
+                _ = Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (_dialogHwnd != dialogHwnd || _dialogController != controller)
+                    {
+                        return;
+                    }
+
+                    _isFolderDialog = snapshot.IsFolderDialog;
+                    _lastFileTypeFilterText = snapshot.FilterText;
+                    ApplyModeUiState();
+                    _ = RefreshCandidatesAsync(immediate: true);
+                }));
+            });
+        }
 
         ApplyModeUiState();
 
@@ -749,47 +759,38 @@ public partial class OverlayWindow : Window
             }
 
             var controller = _dialogController;
-            var isTypeFilterActive = IsTypeFilterActive;
-            var currentMode = _currentMode;
-
-            var folderModeTask = Task.Run(() => controller.IsFolderSelectionDialog());
-            var filterTextTask = Task.Run(() => 
-            {
-                if (isTypeFilterActive && currentMode != OverlayMode.Explorer)
-                {
-                    return controller.GetCurrentFileTypeFilterText();
-                }
-                return _lastFileTypeFilterText;
-            });
-
-            var monitorTask = Task.WhenAll(folderModeTask, filterTextTask);
+            var shouldPollFilterText = ShouldPollDialogFilterText();
+            (bool IsFolderDialog, string FilterText) snapshot;
             try
             {
-                await monitorTask.WaitAsync(TimeSpan.FromMilliseconds(320));
+                snapshot = await Task.Run(
+                        () => CaptureDialogSnapshot(controller, shouldPollFilterText, _lastFileTypeFilterText))
+                    .WaitAsync(DialogMonitorTimeout);
             }
             catch (TimeoutException)
             {
                 return;
             }
 
-            if (_dialogController != controller) return;
+            if (_dialogController != controller)
+            {
+                return;
+            }
 
-            var folderMode = folderModeTask.Result;
-            var folderModeChanged = folderMode != _isFolderDialog;
+            var folderModeChanged = snapshot.IsFolderDialog != _isFolderDialog;
             if (folderModeChanged)
             {
-                _isFolderDialog = folderMode;
+                _isFolderDialog = snapshot.IsFolderDialog;
                 ApplyModeUiState();
             }
 
             var filterChanged = false;
-            if (isTypeFilterActive && currentMode != OverlayMode.Explorer)
+            if (shouldPollFilterText)
             {
-                var filterText = filterTextTask.Result;
-                filterChanged = !string.Equals(filterText, _lastFileTypeFilterText, StringComparison.OrdinalIgnoreCase);
+                filterChanged = !string.Equals(snapshot.FilterText, _lastFileTypeFilterText, StringComparison.OrdinalIgnoreCase);
                 if (filterChanged)
                 {
-                    _lastFileTypeFilterText = filterText;
+                    _lastFileTypeFilterText = snapshot.FilterText;
                 }
             }
 
@@ -1119,6 +1120,7 @@ public partial class OverlayWindow : Window
             ? "文件夹选择时不启用类型过滤"
             : "按文件类型过滤";
         SortButton.IsEnabled = _currentMode is OverlayMode.Search or OverlayMode.Recent;
+        UpdateDialogMonitorInterval();
     }
 
     private void UpdateSortButtonLabel()
@@ -1296,7 +1298,33 @@ public partial class OverlayWindow : Window
             return false;
         }
 
-        return allowedExtensions.Contains(extension.ToLowerInvariant());
+        return allowedExtensions.Contains(extension);
+    }
+
+    private bool ShouldPollDialogFilterText()
+    {
+        return IsTypeFilterActive && _currentMode is OverlayMode.Search or OverlayMode.Recent;
+    }
+
+    private void UpdateDialogMonitorInterval()
+    {
+        _dialogMonitorTimer.Interval = ShouldPollDialogFilterText()
+            ? DialogMonitorBusyInterval
+            : DialogMonitorIdleInterval;
+    }
+
+    private static (bool IsFolderDialog, string FilterText) CaptureDialogSnapshot(
+        FileDialogAutomationController controller,
+        bool includeFilterText,
+        string fallbackFilterText)
+    {
+        var isFolderDialog = controller.IsFolderSelectionDialog();
+        if (!includeFilterText)
+        {
+            return (isFolderDialog, fallbackFilterText);
+        }
+
+        return (isFolderDialog, controller.GetCurrentFileTypeFilterText());
     }
 
     private FileCandidate? GetCurrentOrFirstCandidate()

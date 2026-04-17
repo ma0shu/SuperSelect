@@ -41,28 +41,10 @@ internal sealed class EverythingService
         int maxResults,
         CancellationToken cancellationToken)
     {
-        var query = string.IsNullOrWhiteSpace(keyword)
-            ? "file:"
-            : $"file: {keyword.Trim()}";
+        var query = BuildSearchQuery(isDirectoryQuery: false, keyword);
 
         return Task.Run(
             () => QueryInternal(query, ToEverythingSort(sortOption), maxResults, isDirectoryResult: false, CandidateSource.EverythingSearch, cancellationToken),
-            cancellationToken);
-    }
-
-    public Task<IReadOnlyList<FileCandidate>> SearchFilesPageAsync(
-        string keyword,
-        EverythingSortOption sortOption,
-        int offset,
-        int pageSize,
-        CancellationToken cancellationToken)
-    {
-        var query = string.IsNullOrWhiteSpace(keyword)
-            ? "file:"
-            : $"file: {keyword.Trim()}";
-
-        return Task.Run(
-            () => QueryPageInternal(query, ToEverythingSort(sortOption), offset, pageSize, isDirectoryResult: false, CandidateSource.EverythingSearch, cancellationToken),
             cancellationToken);
     }
 
@@ -72,28 +54,10 @@ internal sealed class EverythingService
         int maxResults,
         CancellationToken cancellationToken)
     {
-        var query = string.IsNullOrWhiteSpace(keyword)
-            ? "folder:"
-            : $"folder: {keyword.Trim()}";
+        var query = BuildSearchQuery(isDirectoryQuery: true, keyword);
 
         return Task.Run(
             () => QueryInternal(query, ToEverythingSort(sortOption), maxResults, isDirectoryResult: true, CandidateSource.EverythingSearch, cancellationToken),
-            cancellationToken);
-    }
-
-    public Task<IReadOnlyList<FileCandidate>> SearchFoldersPageAsync(
-        string keyword,
-        EverythingSortOption sortOption,
-        int offset,
-        int pageSize,
-        CancellationToken cancellationToken)
-    {
-        var query = string.IsNullOrWhiteSpace(keyword)
-            ? "folder:"
-            : $"folder: {keyword.Trim()}";
-
-        return Task.Run(
-            () => QueryPageInternal(query, ToEverythingSort(sortOption), offset, pageSize, isDirectoryResult: true, CandidateSource.EverythingSearch, cancellationToken),
             cancellationToken);
     }
 
@@ -107,17 +71,6 @@ internal sealed class EverythingService
             cancellationToken);
     }
 
-    public Task<IReadOnlyList<FileCandidate>> RecentFilesPageAsync(
-        EverythingSortOption sortOption,
-        int offset,
-        int pageSize,
-        CancellationToken cancellationToken)
-    {
-        return Task.Run(
-            () => QueryPageInternal("file:", ToEverythingSort(sortOption), offset, pageSize, isDirectoryResult: false, CandidateSource.EverythingRecent, cancellationToken),
-            cancellationToken);
-    }
-
     public Task<IReadOnlyList<FileCandidate>> RecentFoldersAsync(
         EverythingSortOption sortOption,
         int maxResults,
@@ -125,17 +78,6 @@ internal sealed class EverythingService
     {
         return Task.Run(
             () => QueryInternal("folder:", ToEverythingSort(sortOption), maxResults, isDirectoryResult: true, CandidateSource.EverythingRecent, cancellationToken),
-            cancellationToken);
-    }
-
-    public Task<IReadOnlyList<FileCandidate>> RecentFoldersPageAsync(
-        EverythingSortOption sortOption,
-        int offset,
-        int pageSize,
-        CancellationToken cancellationToken)
-    {
-        return Task.Run(
-            () => QueryPageInternal("folder:", ToEverythingSort(sortOption), offset, pageSize, isDirectoryResult: true, CandidateSource.EverythingRecent, cancellationToken),
             cancellationToken);
     }
 
@@ -147,9 +89,7 @@ internal sealed class EverythingService
         IReadOnlySet<string> allowedExtensions,
         CancellationToken cancellationToken)
     {
-        var query = string.IsNullOrWhiteSpace(keyword)
-            ? "file:"
-            : $"file: {keyword.Trim()}";
+        var query = BuildSearchQuery(isDirectoryQuery: false, keyword);
 
         return Task.Run(
             () => QueryPageFilteredInternal(
@@ -180,6 +120,14 @@ internal sealed class EverythingService
                 allowedExtensions,
                 cancellationToken),
             cancellationToken);
+    }
+
+    private static string BuildSearchQuery(bool isDirectoryQuery, string keyword)
+    {
+        var prefix = isDirectoryQuery ? "folder:" : "file:";
+        return string.IsNullOrWhiteSpace(keyword)
+            ? prefix
+            : $"{prefix} {keyword.Trim()}";
     }
 
     private IReadOnlyList<FileCandidate> QueryInternal(
@@ -418,7 +366,7 @@ internal sealed class EverythingService
             return false;
         }
 
-        return allowedExtensions.Contains(extension.ToLowerInvariant());
+        return allowedExtensions.Contains(extension);
     }
 
     private bool EnsureAvailableLocked()

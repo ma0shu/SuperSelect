@@ -68,10 +68,15 @@ internal static class AppLogger
 
     private static void FlushLoop()
     {
-        while (!FlushCts.IsCancellationRequested)
+        while (true)
         {
-            _ = FlushSignal.WaitOne(500);
+            _ = FlushSignal.WaitOne();
             FlushPending();
+
+            if (FlushCts.IsCancellationRequested)
+            {
+                break;
+            }
         }
 
         FlushPending();

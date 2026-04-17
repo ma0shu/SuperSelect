@@ -1,8 +1,10 @@
+using System;
 using System.IO;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Windows.Automation;
+using System.Collections.Generic;
+using System.Linq;
 using SuperSelect.App.Models;
 using SuperSelect.App.Native;
 
@@ -11,7 +13,7 @@ namespace SuperSelect.App.Services;
 internal sealed class FileDialogAutomationController
 {
     private static readonly string[] FileNameKeywords = ["file name", "filename", "文件名"];
-    private static readonly string[] ConfirmKeywords = ["open", "save", "select", "打开", "保存", "选择"];
+    private static readonly string[] ConfirmKeywords = ["open", "save", "select", "ok", "确定", "打开", "保存", "选择"];
     private static readonly string[] FileTypeKeywords = ["file type", "save as type", "类型", "文件类型", "保存类型"];
     private static readonly string[] FolderDialogTitleKeywords =
     [
@@ -20,18 +22,12 @@ internal sealed class FileDialogAutomationController
         "browse for folder",
         "打开文件夹",
         "选择文件夹",
-        "浏览文件夹",
-    ];
-    private static readonly string[] FolderConfirmKeywords =
-    [
-        "select folder",
-        "choose folder",
-        "打开文件夹",
-        "选择文件夹",
+        "浏览文件夹"
     ];
     private static readonly Regex ExtensionRegex = new(@"\*\.[a-zA-Z0-9]+|\.[a-zA-Z0-9]+", RegexOptions.Compiled);
     private static readonly IReadOnlySet<string> EmptyExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     private const uint AutomationMessageTimeoutMs = 300;
+    private const uint BffmSetSelectionW = 0x0467;
 
     private readonly IntPtr _dialogHwnd;
     private readonly object _cacheSyncRoot = new();
@@ -49,61 +45,94 @@ internal sealed class FileDialogAutomationController
     public static bool IsLikelyFileDialog(IntPtr hwnd)
     {
         if (hwnd == IntPtr.Zero || !NativeMethods.IsWindow(hwnd) || !NativeMethods.IsWindowVisible(hwnd))
-        {
             return false;
-        }
 
         var className = NativeMethods.GetWindowClassName(hwnd);
         if (!string.Equals(className, "#32770", StringComparison.Ordinal))
-        {
             return false;
-        }
 
-        // Modern File Dialogs
         if (NativeMethods.FindWindowEx(hwnd, IntPtr.Zero, "DUIViewWndClassName", null) != IntPtr.Zero)
-        {
             return true;
-        }
 
-        // Older File Dialogs
         if (NativeMethods.FindWindowEx(hwnd, IntPtr.Zero, "ComboBoxEx32", null) != IntPtr.Zero ||
             NativeMethods.GetDlgItem(hwnd, 1148) != IntPtr.Zero)
-        {
             return true;
-        }
+
+        var titleBuilder = new System.Text.StringBuilder(256);
+        NativeMethods.GetWindowText(hwnd, titleBuilder, titleBuilder.Capacity);
+        var title = titleBuilder.ToString();
+
+        if (!string.IsNullOrWhiteSpace(title) && ContainsAny(title, FolderDialogTitleKeywords))
+            return true;
+
+        if (NativeMethods.FindWindowEx(hwnd, IntPtr.Zero, "SysTreeView32", null) != IntPtr.Zero &&
+            NativeMethods.GetDlgItem(hwnd, 1) != IntPtr.Zero)
+            return true;
 
         return false;
     }
 
     public bool TryPrimeSelection(FileCandidate candidate)
     {
-        return TryPrimeSelectionAsync(candidate).GetAwaiter().GetResult();
+        bool success = TryPrimeSelectionAsync(candidate).GetAwaiter().GetResult();
+        if (!success) DumpDialogStateForDebugging("TryPrimeSelection_Failed");
+        return success;
+    }
+
+    private void DumpDialogStateForDebugging(string tag)
+    {
+        try
+        {
+            var dumpSb = new System.Text.StringBuilder();
+            dumpSb.AppendLine($"--- Dialog Dump ({tag}) ---");
+            dumpSb.AppendLine($"Main Window HWND: {_dialogHwnd}");
+            if (_dialogHwnd == IntPtr.Zero || !NativeMethods.IsWindow(_dialogHwnd))
+            {
+                dumpSb.AppendLine("Window is invalid or closed.");
+                AppLogger.LogWarning(dumpSb.ToString());
+                return;
+            }
+
+            var sb = new System.Text.StringBuilder(256);
+            NativeMethods.GetWindowText(_dialogHwnd, sb, sb.Capacity);
+            dumpSb.AppendLine($"Title: {sb}");
+
+            NativeMethods.GetClassName(_dialogHwnd, sb, sb.Capacity);
+            dumpSb.AppendLine($"Class Name: {sb}");
+
+            dumpSb.AppendLine($"IsFolderSelectionDialog(): {IsFolderSelectionDialog()}");
+
+            dumpSb.AppendLine("--- Child Windows ---");
+            NativeMethods.EnumChildWindows(_dialogHwnd, (childHwnd, lParam) =>
+            {
+                int id = NativeMethods.GetDlgCtrlID(childHwnd);
+                var clsSb = new System.Text.StringBuilder(256);
+                NativeMethods.GetClassName(childHwnd, clsSb, clsSb.Capacity);
+                var txtSb = new System.Text.StringBuilder(256);
+                NativeMethods.GetWindowText(childHwnd, txtSb, txtSb.Capacity);
+                
+                dumpSb.AppendLine($"HWND: {childHwnd} | ID: {id} | Class: {clsSb} | Text: {txtSb}");
+                return true;
+            }, IntPtr.Zero);
+            
+            AppLogger.LogWarning(dumpSb.ToString());
+        }
+        catch { }
     }
 
     public async Task<bool> TryPrimeSelectionAsync(FileCandidate candidate, CancellationToken cancellationToken = default)
     {
-        if (candidate.IsDirectory)
-        {
-            return TryNavigateToDirectory(candidate.FullPath);
-        }
+        if (candidate.IsDirectory) return TryPrimeDirectorySelection(candidate.FullPath);
 
         var directory = Path.GetDirectoryName(candidate.FullPath);
         var fileName = Path.GetFileName(candidate.FullPath);
 
         if (string.IsNullOrWhiteSpace(directory) || string.IsNullOrWhiteSpace(fileName))
-        {
             return false;
-        }
 
-        var root = TryGetRoot();
-        if (root is null)
-        {
-            return false;
-        }
-
-        var edit = GetFileNameEdit(root);
-        var confirm = GetConfirmButton(root);
-        if (edit is null || confirm is null)
+        var edit = GetFileNameEdit();
+        var confirm = GetConfirmButton();
+        if (edit == IntPtr.Zero || confirm == IntPtr.Zero)
         {
             InvalidateControlCaches();
             return false;
@@ -111,79 +140,95 @@ internal sealed class FileDialogAutomationController
 
         TryActivateDialog();
 
-        if (!TrySetText(edit, directory))
-        {
-            return false;
-        }
+        if (!TrySetText(edit, directory)) return false;
+        if (!TryInvoke(confirm)) return false;
 
-        if (!TryInvoke(confirm))
-        {
-            return false;
-        }
+        try { await Task.Delay(40, cancellationToken).ConfigureAwait(false); } catch { return false; }
 
-        try
-        {
-            await Task.Delay(40, cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            return false;
-        }
+        edit = GetFileNameEdit();
+        if (edit == IntPtr.Zero) return false;
 
-        var refreshedRoot = TryGetRoot();
-        if (refreshedRoot is not null)
-        {
-            edit = GetFileNameEdit(refreshedRoot) ?? edit;
-        }
+        if (!TrySetText(edit, fileName)) return false;
 
-        if (!TrySetText(edit, fileName))
-        {
-            return false;
-        }
-
-        try
-        {
-            await Task.Delay(40, cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            return false;
-        }
-
-        refreshedRoot = TryGetRoot();
-        if (refreshedRoot is not null)
-        {
-            _ = TrySelectFileInList(refreshedRoot, fileName);
-        }
+        try { await Task.Delay(40, cancellationToken).ConfigureAwait(false); } catch { return false; }
 
         return true;
     }
 
     public bool TryConfirmSelection(FileCandidate candidate)
     {
+        bool success = false;
         if (candidate.IsDirectory)
         {
-            return TryNavigateToDirectory(candidate.FullPath);
+            success = TryConfirmDirectorySelection(candidate.FullPath);
         }
-
-        var root = TryGetRoot();
-        if (root is null)
+        else
         {
-            return false;
+            var edit = GetFileNameEdit();
+            var confirm = GetConfirmButton();
+            if (edit == IntPtr.Zero || confirm == IntPtr.Zero)
+            {
+                InvalidateControlCaches();
+            }
+            else
+            {
+                TryActivateDialog();
+                if (TrySetText(edit, candidate.FullPath))
+                {
+                    success = TryInvoke(confirm);
+                }
+            }
         }
 
-        var edit = GetFileNameEdit(root);
-        var confirm = GetConfirmButton(root);
-        if (edit is null || confirm is null)
+        if (!success) DumpDialogStateForDebugging("TryConfirmSelection_Failed");
+        return success;
+    }
+
+    private bool TryPrimeDirectorySelection(string directoryPath)
+    {
+        if (string.IsNullOrWhiteSpace(directoryPath)) return false;
+
+        var isFolderDialog = IsFolderSelectionDialog();
+        var normalizedPath = NormalizeDirectoryPath(directoryPath);
+
+        TryActivateDialog();
+
+        if (isFolderDialog && TrySetFolderSelectionViaBrowseMessage(normalizedPath))
+            return true;
+
+        var edit = GetFileNameEdit();
+        if (edit == IntPtr.Zero)
         {
             InvalidateControlCaches();
             return false;
         }
 
-        TryActivateDialog();
+        if (!TrySetText(edit, normalizedPath)) return false;
 
-        if (!TrySetText(edit, candidate.FullPath))
+        if (isFolderDialog) return true;
+
+        var confirm = GetConfirmButton();
+        if (confirm == IntPtr.Zero)
         {
+            InvalidateControlCaches();
+            return false;
+        }
+
+        return TryInvoke(confirm);
+    }
+
+    private bool TryConfirmDirectorySelection(string directoryPath)
+    {
+        if (!TryPrimeDirectorySelection(directoryPath)) return false;
+
+        if (!IsFolderSelectionDialog()) return true;
+
+        if (TryClickPrimaryButtonFast()) return true;
+
+        var confirm = GetConfirmButton();
+        if (confirm == IntPtr.Zero)
+        {
+            InvalidateControlCaches();
             return false;
         }
 
@@ -192,20 +237,11 @@ internal sealed class FileDialogAutomationController
 
     public bool TryNavigateToDirectory(string directoryPath)
     {
-        if (string.IsNullOrWhiteSpace(directoryPath))
-        {
-            return false;
-        }
+        if (string.IsNullOrWhiteSpace(directoryPath)) return false;
 
-        var root = TryGetRoot();
-        if (root is null)
-        {
-            return false;
-        }
-
-        var edit = GetFileNameEdit(root);
-        var confirm = GetConfirmButton(root);
-        if (edit is null || confirm is null)
+        var edit = GetFileNameEdit();
+        var confirm = GetConfirmButton();
+        if (edit == IntPtr.Zero || confirm == IntPtr.Zero)
         {
             InvalidateControlCaches();
             return false;
@@ -213,10 +249,7 @@ internal sealed class FileDialogAutomationController
 
         TryActivateDialog();
 
-        if (!TrySetText(edit, directoryPath))
-        {
-            return false;
-        }
+        if (!TrySetText(edit, directoryPath)) return false;
 
         return TryInvoke(confirm);
     }
@@ -228,13 +261,7 @@ internal sealed class FileDialogAutomationController
             var filterText = currentFilterText;
             if (string.IsNullOrWhiteSpace(filterText))
             {
-                var root = TryGetRoot();
-                if (root is null)
-                {
-                    return EmptyExtensions;
-                }
-
-                filterText = TryReadFileTypeFilterText(root);
+                filterText = TryReadFileTypeFilterText();
             }
 
             filterText ??= string.Empty;
@@ -242,9 +269,7 @@ internal sealed class FileDialogAutomationController
             lock (_cacheSyncRoot)
             {
                 if (string.Equals(filterText, _cachedExtensionFilterText, StringComparison.OrdinalIgnoreCase))
-                {
                     return _cachedAllowedExtensions;
-                }
             }
 
             var parsed = ParseExtensions(filterText);
@@ -256,47 +281,39 @@ internal sealed class FileDialogAutomationController
 
             return parsed;
         }
-        catch
-        {
-            return EmptyExtensions;
-        }
+        catch { return EmptyExtensions; }
     }
 
     public string GetCurrentFileTypeFilterText()
     {
-        try
-        {
-            var root = TryGetRoot();
-            if (root is null)
-            {
-                return string.Empty;
-            }
-
-            return TryReadFileTypeFilterText(root) ?? string.Empty;
-        }
-        catch
-        {
-            return string.Empty;
-        }
+        try { return TryReadFileTypeFilterText() ?? string.Empty; }
+        catch { return string.Empty; }
     }
 
     public bool IsFolderSelectionDialog()
     {
-        if (_dialogHwnd == IntPtr.Zero || !NativeMethods.IsWindow(_dialogHwnd))
-        {
-            return false;
-        }
+        if (_dialogHwnd == IntPtr.Zero || !NativeMethods.IsWindow(_dialogHwnd)) return false;
 
         var sb = new System.Text.StringBuilder(256);
         NativeMethods.GetWindowText(_dialogHwnd, sb, sb.Capacity);
         var title = sb.ToString();
 
         if (!string.IsNullOrWhiteSpace(title) && ContainsAny(title, FolderDialogTitleKeywords))
-        {
             return true;
-        }
 
-        return false;
+        bool hasTree = false;
+        bool hasDirectUI = false;
+        NativeMethods.EnumChildWindows(_dialogHwnd, (child, lParam) =>
+        {
+            var classNameSb = new System.Text.StringBuilder(256);
+            NativeMethods.GetClassName(child, classNameSb, classNameSb.Capacity);
+            var cls = classNameSb.ToString();
+            if (cls == "SysTreeView32") hasTree = true;
+            if (cls == "DirectUIHWND") hasDirectUI = true;
+            return true;
+        }, IntPtr.Zero);
+
+        return hasTree && !hasDirectUI;
     }
 
     private void TryActivateDialog()
@@ -307,67 +324,30 @@ internal sealed class FileDialogAutomationController
         }
     }
 
-    private AutomationElement? TryGetRoot()
-    {
-        if (_dialogHwnd == IntPtr.Zero || !NativeMethods.IsWindow(_dialogHwnd))
-        {
-            InvalidateControlCaches();
-            return null;
-        }
-
-        try
-        {
-            return AutomationElement.FromHandle(_dialogHwnd);
-        }
-        catch
-        {
-            InvalidateControlCaches();
-            return null;
-        }
-    }
-
-    private AutomationElement? GetFileNameEdit(AutomationElement root)
+    private IntPtr GetFileNameEdit()
     {
         IntPtr cachedHandle;
-        lock (_cacheSyncRoot)
-        {
-            cachedHandle = _cachedEditHwnd;
-        }
+        lock (_cacheSyncRoot) cachedHandle = _cachedEditHwnd;
 
-        var cached = TryGetElementFromHandle(cachedHandle);
-        if (cached is not null)
-        {
-            return cached;
-        }
+        if (cachedHandle != IntPtr.Zero && NativeMethods.IsWindow(cachedHandle))
+            return cachedHandle;
 
-        var discovered = FindFileNameEdit(root);
-        lock (_cacheSyncRoot)
-        {
-            _cachedEditHwnd = GetNativeHandle(discovered);
-        }
+        var discovered = FindFileNameEdit();
+        lock (_cacheSyncRoot) _cachedEditHwnd = discovered;
 
         return discovered;
     }
 
-    private AutomationElement? GetConfirmButton(AutomationElement root)
+    private IntPtr GetConfirmButton()
     {
         IntPtr cachedHandle;
-        lock (_cacheSyncRoot)
-        {
-            cachedHandle = _cachedConfirmHwnd;
-        }
+        lock (_cacheSyncRoot) cachedHandle = _cachedConfirmHwnd;
 
-        var cached = TryGetElementFromHandle(cachedHandle);
-        if (cached is not null)
-        {
-            return cached;
-        }
+        if (cachedHandle != IntPtr.Zero && NativeMethods.IsWindow(cachedHandle))
+            return cachedHandle;
 
-        var discovered = FindConfirmButton(root);
-        lock (_cacheSyncRoot)
-        {
-            _cachedConfirmHwnd = GetNativeHandle(discovered);
-        }
+        var discovered = FindConfirmButton();
+        lock (_cacheSyncRoot) _cachedConfirmHwnd = discovered;
 
         return discovered;
     }
@@ -384,203 +364,76 @@ internal sealed class FileDialogAutomationController
         }
     }
 
-    private static AutomationElement? TryGetElementFromHandle(IntPtr hwnd)
+    private IntPtr FindFileNameEdit()
     {
-        if (hwnd == IntPtr.Zero || !NativeMethods.IsWindow(hwnd))
-        {
-            return null;
-        }
+        if (_dialogHwnd == IntPtr.Zero || !NativeMethods.IsWindow(_dialogHwnd)) return IntPtr.Zero;
 
-        try
+        IntPtr foundEdit = IntPtr.Zero;
+        IntPtr firstEdit = IntPtr.Zero;
+
+        NativeMethods.EnumChildWindows(_dialogHwnd, (childHwnd, lParam) =>
         {
-            return AutomationElement.FromHandle(hwnd);
-        }
-        catch
-        {
-            return null;
-        }
+            var sb = new System.Text.StringBuilder(256);
+            NativeMethods.GetClassName(childHwnd, sb, sb.Capacity);
+            if (sb.ToString() == "Edit")
+            {
+                if (firstEdit == IntPtr.Zero) firstEdit = childHwnd;
+
+                int id = NativeMethods.GetDlgCtrlID(childHwnd);
+                if (id == 1001 || id == 1148 || id == 1019 || id == 1012)
+                {
+                    foundEdit = childHwnd;
+                    return false; 
+                }
+            }
+            return true;
+        }, IntPtr.Zero);
+
+        if (foundEdit != IntPtr.Zero) return foundEdit;
+        if (firstEdit != IntPtr.Zero) return firstEdit;
+
+        return IntPtr.Zero;
     }
 
-    private static IntPtr GetNativeHandle(AutomationElement? element)
+    private IntPtr FindConfirmButton()
     {
-        if (element is null)
-        {
-            return IntPtr.Zero;
-        }
+        if (_dialogHwnd == IntPtr.Zero || !NativeMethods.IsWindow(_dialogHwnd)) return IntPtr.Zero;
 
-        try
+        IntPtr foundBtn = IntPtr.Zero;
+        IntPtr firstBtn = IntPtr.Zero;
+
+        NativeMethods.EnumChildWindows(_dialogHwnd, (childHwnd, lParam) =>
         {
-            return new IntPtr(element.Current.NativeWindowHandle);
-        }
-        catch
-        {
-            return IntPtr.Zero;
-        }
+            var sb = new System.Text.StringBuilder(256);
+            NativeMethods.GetClassName(childHwnd, sb, sb.Capacity);
+            if (sb.ToString() == "Button")
+            {
+                if (firstBtn == IntPtr.Zero) firstBtn = childHwnd;
+
+                int id = NativeMethods.GetDlgCtrlID(childHwnd);
+                if (id == 1) // IDOK
+                {
+                    foundBtn = childHwnd;
+                    return false; 
+                }
+            }
+            return true;
+        }, IntPtr.Zero);
+
+        if (foundBtn != IntPtr.Zero) return foundBtn;
+
+        var btn1 = NativeMethods.GetDlgItem(_dialogHwnd, 1);
+        if (btn1 != IntPtr.Zero) return btn1;
+
+        if (firstBtn != IntPtr.Zero) return firstBtn;
+
+        return IntPtr.Zero;
     }
 
-    private static AutomationElement? FindFileNameEdit(AutomationElement root)
+    private static bool TrySetText(IntPtr hwnd, string value)
     {
-        try
-        {
-            var hwnd = new IntPtr(root.Current.NativeWindowHandle);
-            if (hwnd != IntPtr.Zero)
-            {
-                var hComboBoxEx32 = NativeMethods.FindWindowEx(hwnd, IntPtr.Zero, "ComboBoxEx32", null);
-                if (hComboBoxEx32 != IntPtr.Zero)
-                {
-                    var hComboBox = NativeMethods.FindWindowEx(hComboBoxEx32, IntPtr.Zero, "ComboBox", null);
-                    if (hComboBox != IntPtr.Zero)
-                    {
-                        var hEdit = NativeMethods.FindWindowEx(hComboBox, IntPtr.Zero, "Edit", null);
-                        if (hEdit != IntPtr.Zero)
-                        {
-                            return AutomationElement.FromHandle(hEdit);
-                        }
-                    }
-                }
+        if (hwnd == IntPtr.Zero || !NativeMethods.IsWindow(hwnd)) return false;
 
-                var hEditId = NativeMethods.GetDlgItem(hwnd, 1148);
-                if (hEditId != IntPtr.Zero)
-                {
-                    return AutomationElement.FromHandle(hEditId);
-                }
-            }
-
-            var edits = root.FindAll(
-                TreeScope.Descendants,
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit));
-
-            for (var i = 0; i < edits.Count; i++)
-            {
-                var edit = edits[i];
-                string? name = null;
-                try
-                {
-                    name = edit.Current.Name;
-                }
-                catch
-                {
-                    // Ignore per-item transient UIA failure.
-                }
-
-                if (!string.IsNullOrWhiteSpace(name) && ContainsAny(name, FileNameKeywords))
-                {
-                    return edit;
-                }
-            }
-
-            return edits.Count > 0 ? edits[edits.Count - 1] : null;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static AutomationElement? FindConfirmButton(AutomationElement root)
-    {
-        try
-        {
-            var hwnd = new IntPtr(root.Current.NativeWindowHandle);
-            if (hwnd != IntPtr.Zero)
-            {
-                var btn1 = NativeMethods.GetDlgItem(hwnd, 1);
-                if (btn1 != IntPtr.Zero)
-                {
-                    return AutomationElement.FromHandle(btn1);
-                }
-            }
-
-            var buttons = root.FindAll(
-                TreeScope.Descendants,
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button));
-
-            for (var i = 0; i < buttons.Count; i++)
-            {
-                var button = buttons[i];
-                string? name = null;
-                try
-                {
-                    name = button.Current.Name;
-                }
-                catch
-                {
-                    // Ignore per-item transient UIA failure.
-                }
-
-                if (!string.IsNullOrWhiteSpace(name) && ContainsAny(name, ConfirmKeywords))
-                {
-                    return button;
-                }
-            }
-
-            return buttons.Count > 0 ? buttons[0] : null;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static bool TrySetText(AutomationElement edit, string value)
-    {
-        try
-        {
-            var hwnd = new IntPtr(edit.Current.NativeWindowHandle);
-            if (hwnd != IntPtr.Zero)
-            {
-                if (TrySendTextViaMessage(hwnd, value))
-                {
-                    return true;
-                }
-            }
-
-            if (edit.TryGetCurrentPattern(ValuePattern.Pattern, out var patternObj) &&
-                patternObj is ValuePattern valuePattern &&
-                !valuePattern.Current.IsReadOnly)
-            {
-                valuePattern.SetValue(value);
-                return true;
-            }
-        }
-        catch
-        {
-            return false;
-        }
-
-        return false;
-    }
-
-    private static bool TryInvoke(AutomationElement button)
-    {
-        try
-        {
-            var hwnd = new IntPtr(button.Current.NativeWindowHandle);
-            if (hwnd != IntPtr.Zero)
-            {
-                if (NativeMethods.PostMessage(hwnd, NativeMethods.BM_CLICK, IntPtr.Zero, IntPtr.Zero))
-                {
-                    return true;
-                }
-            }
-
-            if (button.TryGetCurrentPattern(InvokePattern.Pattern, out var patternObj) &&
-                patternObj is InvokePattern invokePattern)
-            {
-                invokePattern.Invoke();
-                return true;
-            }
-        }
-        catch
-        {
-            return false;
-        }
-
-        return false;
-    }
-
-    private static bool TrySendTextViaMessage(IntPtr hwnd, string value)
-    {
         var result = NativeMethods.SendMessageTimeout(
             hwnd,
             (uint)NativeMethods.WM_SETTEXT,
@@ -590,279 +443,236 @@ internal sealed class FileDialogAutomationController
             AutomationMessageTimeoutMs,
             out _);
 
-        return result != IntPtr.Zero;
+        if (result != IntPtr.Zero)
+        {
+            var parent = NativeMethods.GetParent(hwnd);
+            if (parent != IntPtr.Zero)
+            {
+                int id = NativeMethods.GetDlgCtrlID(hwnd);
+                IntPtr wParam = new IntPtr((NativeMethods.EN_CHANGE << 16) | (id & 0xFFFF));
+                NativeMethods.PostMessage(parent, NativeMethods.WM_COMMAND, wParam, hwnd);
+            }
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryInvoke(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero || !NativeMethods.IsWindow(hwnd)) return false;
+
+        return NativeMethods.PostMessage(hwnd, NativeMethods.BM_CLICK, IntPtr.Zero, IntPtr.Zero);
+    }
+
+    private bool TryClickPrimaryButtonFast()
+    {
+        if (_dialogHwnd == IntPtr.Zero || !NativeMethods.IsWindow(_dialogHwnd)) return false;
+
+        var okButton = NativeMethods.GetDlgItem(_dialogHwnd, 1);
+        if (okButton == IntPtr.Zero || !NativeMethods.IsWindow(okButton)) return false;
+
+        return NativeMethods.PostMessage(okButton, NativeMethods.BM_CLICK, IntPtr.Zero, IntPtr.Zero);
+    }
+
+    private static uint GetPidlSize(IntPtr pidl)
+    {
+        uint size = 0;
+        if (pidl == IntPtr.Zero) return 0;
+        int cb = System.Runtime.InteropServices.Marshal.ReadInt16(pidl, (int)size);
+        while (cb != 0)
+        {
+            size += (uint)cb;
+            cb = System.Runtime.InteropServices.Marshal.ReadInt16(pidl, (int)size);
+        }
+        size += 2;
+        return size;
+    }
+
+    private bool TrySetFolderSelectionViaBrowseMessage(string directoryPath)
+    {
+        if (_dialogHwnd == IntPtr.Zero || !NativeMethods.IsWindow(_dialogHwnd) || string.IsNullOrWhiteSpace(directoryPath))
+            return false;
+
+        var normalized = NormalizeDirectoryPath(directoryPath);
+        
+        NativeMethods.GetWindowThreadProcessId(_dialogHwnd, out uint processId);
+        if (processId == 0) return false;
+
+        IntPtr hProcess = NativeMethods.OpenProcess(
+            NativeMethods.PROCESS_VM_OPERATION | NativeMethods.PROCESS_VM_WRITE | NativeMethods.PROCESS_VM_READ, 
+            false, 
+            processId);
+
+        if (hProcess == IntPtr.Zero) return false;
+
+        IntPtr remoteBuffer = IntPtr.Zero;
+        IntPtr remotePidl = IntPtr.Zero;
+        try
+        {
+            if (NativeMethods.SHParseDisplayName(normalized, IntPtr.Zero, out var pidl, 0, out _) == 0 && pidl != IntPtr.Zero)
+            {
+                try
+                {
+                    uint pidlSize = GetPidlSize(pidl);
+                    if (pidlSize > 0)
+                    {
+                        remotePidl = NativeMethods.VirtualAllocEx(hProcess, IntPtr.Zero, pidlSize, 
+                            NativeMethods.MEM_COMMIT | NativeMethods.MEM_RESERVE, NativeMethods.PAGE_READWRITE);
+
+                        if (remotePidl != IntPtr.Zero)
+                        {
+                            byte[] pidlBytes = new byte[pidlSize];
+                            System.Runtime.InteropServices.Marshal.Copy(pidl, pidlBytes, 0, (int)pidlSize);
+                            
+                            if (NativeMethods.WriteProcessMemory(hProcess, remotePidl, pidlBytes, pidlSize, out _))
+                            {
+                                var res1 = NativeMethods.SendMessageTimeout(
+                                    _dialogHwnd, BffmSetSelectionW, IntPtr.Zero, remotePidl, 
+                                    NativeMethods.SMTO_ABORTIFHUNG, AutomationMessageTimeoutMs, out _);
+                                if (res1 != IntPtr.Zero) return true;
+
+                                var res2 = NativeMethods.SendMessageTimeout(
+                                    _dialogHwnd, 0x0466 /* BffmSetSelectionA */, IntPtr.Zero, remotePidl, 
+                                    NativeMethods.SMTO_ABORTIFHUNG, AutomationMessageTimeoutMs, out _);
+                                if (res2 != IntPtr.Zero) return true;
+                            }
+                        }
+                    }
+                }
+                finally
+                {
+                    NativeMethods.CoTaskMemFree(pidl);
+                }
+            }
+
+            byte[] pathBytes = System.Text.Encoding.Unicode.GetBytes(normalized + "\0");
+            uint bufferSize = (uint)pathBytes.Length;
+
+            remoteBuffer = NativeMethods.VirtualAllocEx(hProcess, IntPtr.Zero, bufferSize, 
+                NativeMethods.MEM_COMMIT | NativeMethods.MEM_RESERVE, NativeMethods.PAGE_READWRITE);
+
+            if (remoteBuffer != IntPtr.Zero)
+            {
+                if (NativeMethods.WriteProcessMemory(hProcess, remoteBuffer, pathBytes, bufferSize, out _))
+                {
+                    var result = NativeMethods.SendMessageTimeout(
+                        _dialogHwnd, BffmSetSelectionW, new IntPtr(1), remoteBuffer, 
+                        NativeMethods.SMTO_ABORTIFHUNG, AutomationMessageTimeoutMs, out _);
+
+                    if (result != IntPtr.Zero) return true;
+                }
+            }
+
+            return false;
+        }
+        finally
+        {
+            if (remoteBuffer != IntPtr.Zero) NativeMethods.VirtualFreeEx(hProcess, remoteBuffer, 0, NativeMethods.MEM_RELEASE);
+            if (remotePidl != IntPtr.Zero) NativeMethods.VirtualFreeEx(hProcess, remotePidl, 0, NativeMethods.MEM_RELEASE);
+            NativeMethods.CloseHandle(hProcess);
+        }
+    }
+
+    private static string NormalizeDirectoryPath(string directoryPath)
+    {
+        try { return Path.GetFullPath(directoryPath); }
+        catch { return directoryPath; }
     }
 
     private static bool ContainsAny(string value, IReadOnlyList<string> keywords)
     {
         foreach (var keyword in keywords)
         {
-            if (value.Contains(keyword, StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
+            if (value.Contains(keyword, StringComparison.OrdinalIgnoreCase)) return true;
         }
-
         return false;
     }
 
-    private static bool HasCandidateListControl(AutomationElement root)
+    private string? TryReadFileTypeFilterText()
     {
-        try
-        {
-            var list = root.FindFirst(
-                TreeScope.Descendants,
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.List));
-            if (list is not null)
-            {
-                return true;
-            }
+        IntPtr comboHandle;
+        lock (_cacheSyncRoot) comboHandle = _cachedFileTypeComboHwnd;
 
-            var dataGrid = root.FindFirst(
-                TreeScope.Descendants,
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.DataGrid));
-            return dataGrid is not null;
-        }
-        catch
+        if (comboHandle != IntPtr.Zero && NativeMethods.IsWindow(comboHandle))
         {
-            return false;
+            var cachedText = GetComboDisplayText(comboHandle);
+            if (!string.IsNullOrWhiteSpace(cachedText)) return cachedText;
         }
+
+        var byId = FindFileTypeComboById();
+        if (byId != IntPtr.Zero)
+        {
+            lock (_cacheSyncRoot) _cachedFileTypeComboHwnd = byId;
+            var fromId = GetComboDisplayText(byId);
+            if (!string.IsNullOrWhiteSpace(fromId)) return fromId;
+        }
+
+        return null;
     }
 
-    private string? TryReadFileTypeFilterText(AutomationElement root)
+    private IntPtr FindFileTypeComboById()
     {
-        try
+        if (_dialogHwnd == IntPtr.Zero || !NativeMethods.IsWindow(_dialogHwnd)) return IntPtr.Zero;
+
+        IntPtr foundCombo = IntPtr.Zero;
+
+        NativeMethods.EnumChildWindows(_dialogHwnd, (childHwnd, lParam) =>
         {
-            IntPtr cachedComboHandle;
-            lock (_cacheSyncRoot)
+            var sb = new System.Text.StringBuilder(256);
+            NativeMethods.GetClassName(childHwnd, sb, sb.Capacity);
+            if (sb.ToString() == "ComboBox")
             {
-                cachedComboHandle = _cachedFileTypeComboHwnd;
-            }
-
-            var cachedCombo = TryGetElementFromHandle(cachedComboHandle);
-            if (cachedCombo is not null)
-            {
-                var cachedText = GetComboDisplayText(cachedCombo);
-                if (!string.IsNullOrWhiteSpace(cachedText))
+                int id = NativeMethods.GetDlgCtrlID(childHwnd);
+                if (id == 1136 || id == 1089)
                 {
-                    return cachedText;
+                    foundCombo = childHwnd;
+                    return false; 
                 }
             }
+            return true;
+        }, IntPtr.Zero);
 
-            var byId = FindFileTypeComboById(root);
-            if (byId is not null)
-            {
-                lock (_cacheSyncRoot)
-                {
-                    _cachedFileTypeComboHwnd = GetNativeHandle(byId);
-                }
-
-                var fromId = GetComboDisplayText(byId);
-                if (!string.IsNullOrWhiteSpace(fromId))
-                {
-                    return fromId;
-                }
-            }
-
-            var combos = root.FindAll(
-                TreeScope.Descendants,
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ComboBox));
-
-            for (var i = 0; i < combos.Count; i++)
-            {
-                var combo = combos[i];
-                string? name = null;
-                try
-                {
-                    name = combo.Current.Name;
-                }
-                catch
-                {
-                    // Ignore per-item transient UIA failure.
-                }
-
-                if (!string.IsNullOrWhiteSpace(name) && ContainsAny(name, FileTypeKeywords))
-                {
-                    var fromNamedCombo = GetComboDisplayText(combo);
-                    if (!string.IsNullOrWhiteSpace(fromNamedCombo))
-                    {
-                        lock (_cacheSyncRoot)
-                        {
-                            _cachedFileTypeComboHwnd = GetNativeHandle(combo);
-                        }
-
-                        return fromNamedCombo;
-                    }
-                }
-            }
-
-            for (var i = 0; i < combos.Count; i++)
-            {
-                var combo = combos[i];
-                var any = GetComboDisplayText(combo);
-                if (!string.IsNullOrWhiteSpace(any) && any.Contains("*.", StringComparison.OrdinalIgnoreCase))
-                {
-                    lock (_cacheSyncRoot)
-                    {
-                        _cachedFileTypeComboHwnd = GetNativeHandle(combo);
-                    }
-
-                    return any;
-                }
-            }
-
-            return null;
-        }
-        catch
-        {
-            lock (_cacheSyncRoot)
-            {
-                _cachedFileTypeComboHwnd = IntPtr.Zero;
-            }
-            return null;
-        }
+        return foundCombo;
     }
 
-    private static AutomationElement? FindFileTypeComboById(AutomationElement root)
+    private static string? GetComboDisplayText(IntPtr combo)
     {
-        try
+        var idxParam = NativeMethods.SendMessageTimeout(combo, NativeMethods.CB_GETCURSEL, IntPtr.Zero, IntPtr.Zero, NativeMethods.SMTO_ABORTIFHUNG, AutomationMessageTimeoutMs, out var res);
+        long idx = (long)res;
+        if (idx >= 0 && idxParam != IntPtr.Zero)
         {
-            return root.FindFirst(
-                TreeScope.Descendants,
-                new AndCondition(
-                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ComboBox),
-                    new PropertyCondition(AutomationElement.AutomationIdProperty, "1136")));
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static bool TrySelectFileInList(AutomationElement root, string fileName)
-    {
-        if (string.IsNullOrWhiteSpace(fileName))
-        {
-            return false;
-        }
-
-        AutomationElementCollection items;
-        try
-        {
-            items = root.FindAll(
-                TreeScope.Descendants,
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ListItem));
-        }
-        catch
-        {
-            return false;
-        }
-
-        for (var i = 0; i < items.Count; i++)
-        {
-            var item = items[i];
-            string? name = null;
-            try
+            IntPtr lenParam = NativeMethods.SendMessageTimeout(combo, NativeMethods.CB_GETLBTEXTLEN, new IntPtr((int)idx), IntPtr.Zero, NativeMethods.SMTO_ABORTIFHUNG, AutomationMessageTimeoutMs, out var lenRes);
+            int len = (int)lenRes;
+            if (len > 0)
             {
-                name = item.Current.Name?.Trim();
-            }
-            catch
-            {
-                continue;
-            }
-
-            if (string.IsNullOrWhiteSpace(name) ||
-                !name.Equals(fileName, StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            try
-            {
-                if (item.TryGetCurrentPattern(ScrollItemPattern.Pattern, out var scrollObj) &&
-                    scrollObj is ScrollItemPattern scrollPattern)
+                var sb = new System.Text.StringBuilder(len + 1);
+                var textParam = NativeMethods.SendMessageTimeout(combo, NativeMethods.CB_GETLBTEXT, new IntPtr((int)idx), sb, NativeMethods.SMTO_ABORTIFHUNG, AutomationMessageTimeoutMs, out _);
+                if (textParam != IntPtr.Zero)
                 {
-                    scrollPattern.ScrollIntoView();
-                }
-
-                if (item.TryGetCurrentPattern(SelectionItemPattern.Pattern, out var selectionObj) &&
-                    selectionObj is SelectionItemPattern selectionPattern)
-                {
-                    selectionPattern.Select();
-                    return true;
-                }
-
-                if (item.TryGetCurrentPattern(InvokePattern.Pattern, out var invokeObj) &&
-                    invokeObj is InvokePattern invokePattern)
-                {
-                    invokePattern.Invoke();
-                    return true;
-                }
-            }
-            catch
-            {
-                continue;
-            }
-        }
-
-        return false;
-    }
-
-    private static string? GetComboDisplayText(AutomationElement combo)
-    {
-        try
-        {
-            if (combo.TryGetCurrentPattern(SelectionPattern.Pattern, out var selectionObj) &&
-                selectionObj is SelectionPattern selectionPattern)
-            {
-                var selected = selectionPattern.Current.GetSelection();
-                if (selected.Length > 0)
-                {
-                    var selectedName = selected[0].Current.Name;
-                    if (!string.IsNullOrWhiteSpace(selectedName))
-                    {
-                        return selectedName;
-                    }
+                    return sb.ToString();
                 }
             }
         }
-        catch
+        
+        var txtLenParam = NativeMethods.SendMessageTimeout(combo, NativeMethods.WM_GETTEXTLENGTH, IntPtr.Zero, IntPtr.Zero, NativeMethods.SMTO_ABORTIFHUNG, AutomationMessageTimeoutMs, out var txtLenRes);
+        int txtLen = (int)txtLenRes;
+        if (txtLen > 0)
         {
-            // Ignore and continue.
-        }
-
-        try
-        {
-            var textElement = combo.FindFirst(
-                TreeScope.Descendants,
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text));
-
-            if (textElement is not null && !string.IsNullOrWhiteSpace(textElement.Current.Name))
+            var sb = new System.Text.StringBuilder(txtLen + 1);
+            var textParam = NativeMethods.SendMessageTimeout(combo, NativeMethods.WM_GETTEXT, new IntPtr(txtLen + 1), sb, NativeMethods.SMTO_ABORTIFHUNG, AutomationMessageTimeoutMs, out _);
+            if (textParam != IntPtr.Zero && sb.Length > 0)
             {
-                return textElement.Current.Name;
+                return sb.ToString();
             }
         }
-        catch
-        {
-            // Ignore and continue.
-        }
 
-        try
-        {
-            return combo.Current.Name;
-        }
-        catch
-        {
-            return null;
-        }
+        return null;
     }
 
     private static IReadOnlySet<string> ParseExtensions(string? filterText)
     {
-        if (string.IsNullOrWhiteSpace(filterText))
-        {
-            return EmptyExtensions;
-        }
+        if (string.IsNullOrWhiteSpace(filterText)) return EmptyExtensions;
 
         if (filterText.Contains("*.*", StringComparison.OrdinalIgnoreCase) ||
             filterText.Contains("all files", StringComparison.OrdinalIgnoreCase) ||
@@ -876,27 +686,14 @@ internal sealed class FileDialogAutomationController
         foreach (Match match in matches)
         {
             var token = match.Value.Trim();
-            if (token.StartsWith("*", StringComparison.Ordinal))
-            {
-                token = token[1..];
-            }
-
-            if (!token.StartsWith(".", StringComparison.Ordinal))
-            {
-                continue;
-            }
+            if (token.StartsWith("*", StringComparison.Ordinal)) token = token[1..];
+            if (!token.StartsWith(".", StringComparison.Ordinal)) continue;
 
             token = token.TrimEnd(')', ';', ',', ' ');
-            if (token.Length <= 1)
-            {
-                continue;
-            }
+            if (token.Length <= 1) continue;
 
             var extBody = token[1..];
-            if (extBody.All(char.IsLetterOrDigit))
-            {
-                result.Add(token.ToLowerInvariant());
-            }
+            if (extBody.All(char.IsLetterOrDigit)) result.Add(token);
         }
 
         return result.Count == 0 ? EmptyExtensions : result;

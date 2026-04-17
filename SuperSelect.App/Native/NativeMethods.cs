@@ -148,12 +148,68 @@ internal static class NativeMethods
         uint uTimeout,
         out IntPtr lpdwResult);
 
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    internal static extern IntPtr SendMessageTimeout(
+        IntPtr hWnd,
+        uint msg,
+        IntPtr wParam,
+        StringBuilder lParam,
+        uint fuFlags,
+        uint uTimeout,
+        out IntPtr lpdwResult);
+
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
+    [DllImport("user32.dll", ExactSpelling = true, CharSet = CharSet.Auto)]
+    internal static extern IntPtr GetParent(IntPtr hWnd);
+
+    internal const int WM_COMMAND = 0x0111;
+    internal const int EN_CHANGE = 0x0300;
+
+    internal const int WM_GETTEXT = 0x000D;
+    internal const int WM_GETTEXTLENGTH = 0x000E;
+    internal const int CB_GETCURSEL = 0x0147;
+    internal const int CB_GETLBTEXT = 0x0148;
+    internal const int CB_GETLBTEXTLEN = 0x0149;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern IntPtr VirtualAllocEx(IntPtr hProcess, IntPtr lpAddress, uint dwSize, uint flAllocationType, uint flProtect);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern bool WriteProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer, uint nSize, out uint lpNumberOfBytesWritten);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern bool VirtualFreeEx(IntPtr hProcess, IntPtr lpAddress, uint dwSize, uint dwFreeType);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern bool CloseHandle(IntPtr hObject);
+
+    internal const uint PROCESS_VM_OPERATION = 0x0008;
+    internal const uint PROCESS_VM_READ = 0x0010;
+    internal const uint PROCESS_VM_WRITE = 0x0020;
+    internal const uint MEM_COMMIT = 0x1000;
+    internal const uint MEM_RESERVE = 0x2000;
+    internal const uint MEM_RELEASE = 0x8000;
+    internal const uint PAGE_READWRITE = 0x04;
+
     [DllImport("kernel32.dll")]
     internal static extern IntPtr GetCurrentProcess();
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    internal static extern int SHParseDisplayName(
+        string name,
+        IntPtr pbc,
+        out IntPtr ppidl,
+        uint sfgaoIn,
+        out uint psfgaoOut);
+
+    [DllImport("ole32.dll")]
+    internal static extern void CoTaskMemFree(IntPtr pv);
 
     [DllImport("psapi.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -164,6 +220,18 @@ internal static class NativeMethods
 
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
     internal static extern IntPtr FindWindowEx(IntPtr hwndParent, IntPtr hwndChildAfter, string lpszClass, string? lpszWindow);
+
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool EnumChildWindows(IntPtr hwndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    internal static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+    [DllImport("user32.dll")]
+    internal static extern int GetDlgCtrlID(IntPtr hwnd);
 
     [DllImport("user32.dll")]
     internal static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
