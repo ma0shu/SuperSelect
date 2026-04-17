@@ -185,7 +185,7 @@
                              BorderThickness="0"
                              Background="Transparent"
                              TextChanged="SearchBox_OnTextChanged"
-                             KeyDown="SearchBox_OnKeyDown" />
+                             PreviewKeyDown="SearchBox_OnPreviewKeyDown" />
                 </Border>
 
                 <StackPanel Grid.Column="1"
@@ -256,7 +256,6 @@
                          VirtualizingPanel.IsVirtualizing="True"
                          VirtualizingPanel.VirtualizationMode="Recycling"
                          PreviewMouseWheel="ResultList_OnPreviewMouseWheel"
-                         SelectionChanged="ResultList_OnSelectionChanged"
                          MouseDoubleClick="ResultList_OnMouseDoubleClick"
                          KeyDown="ResultList_OnKeyDown"
                          ContextMenuOpening="ResultList_OnContextMenuOpening">
@@ -270,8 +269,23 @@
                     <ListBox.ItemContainerStyle>
                         <Style TargetType="ListBoxItem">
                             <Setter Property="ContextMenu" Value="{StaticResource TrayContextMenu}" />
+                            <Setter Property="Background" Value="Transparent" />
+                            <Setter Property="BorderBrush" Value="Transparent" />
+                            <Setter Property="BorderThickness" Value="1" />
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
                             <Setter Property="Padding" Value="4"/>
                             <EventSetter Event="PreviewMouseRightButtonDown" Handler="ListBoxItem_PreviewMouseRightButtonDown" />
+                            <EventSetter Event="PreviewMouseLeftButtonUp" Handler="ListBoxItem_PreviewMouseLeftButtonUp" />
+                            <Style.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter Property="Background" Value="#EFF6FF" />
+                                    <Setter Property="BorderBrush" Value="#BFDBFE" />
+                                </Trigger>
+                                <Trigger Property="IsSelected" Value="True">
+                                    <Setter Property="Background" Value="#DBEAFE" />
+                                    <Setter Property="BorderBrush" Value="#93C5FD" />
+                                </Trigger>
+                            </Style.Triggers>
                         </Style>
                     </ListBox.ItemContainerStyle>
                     <ListBox.ItemTemplate>

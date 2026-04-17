@@ -46,7 +46,6 @@ public partial class OverlayWindow : Window
     private ScrollViewer? _resultListScrollViewer;
     private IntPtr _dialogHwnd;
     private int _wheelDeltaAccumulator;
-    private bool _suppressSingleSelect;
     private OverlayMode _currentMode = OverlayMode.Search;
     private int _sortIndex;
     private bool _preferredTypeFilterEnabled;
@@ -574,8 +573,6 @@ public partial class OverlayWindow : Window
 
         if (changed)
         {
-            _suppressSingleSelect = true;
-
             var commonPrefixLength = 0;
             var minCount = Math.Min(_items.Count, items.Count);
             while (commonPrefixLength < minCount &&
@@ -594,8 +591,18 @@ public partial class OverlayWindow : Window
                 _items.Add(items[i]);
             }
 
-            ResultList.SelectedItem = null;
-            _suppressSingleSelect = false;
+            if (_items.Count > 0)
+            {
+                ResultList.SelectedIndex = 0;
+            }
+            else
+            {
+                ResultList.SelectedItem = null;
+            }
+        }
+        else if (_items.Count > 0 && ResultList.SelectedIndex < 0)
+        {
+            ResultList.SelectedIndex = 0;
         }
 
         ResultHost.Visibility = _items.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -817,14 +824,28 @@ public partial class OverlayWindow : Window
         _searchDebounceTimer.Start();
     }
 
-    private void SearchBox_OnKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    private void SearchBox_OnPreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
+        if (e.Key == Key.Down)
+        {
+            MoveSelection(+1);
+            e.Handled = true;
+            return;
+        }
+
+        if (e.Key == Key.Up)
+        {
+            MoveSelection(-1);
+            e.Handled = true;
+            return;
+        }
+
         if (e.Key != Key.Enter)
         {
             return;
         }
 
-        var candidate = ResultList.SelectedItem as FileCandidate ?? _items.FirstOrDefault();
+        var candidate = GetCurrentOrFirstCandidate();
         if (candidate is null)
         {
             return;
@@ -832,21 +853,6 @@ public partial class OverlayWindow : Window
 
         _ = ExecuteConfirmAsync(candidate);
         e.Handled = true;
-    }
-
-    private void ResultList_OnSelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (_suppressSingleSelect || ResultList.SelectedItem is not FileCandidate candidate)
-        {
-            return;
-        }
-
-        if (Mouse.RightButton == MouseButtonState.Pressed)
-        {
-            return;
-        }
-
-        _ = ExecuteSingleAsync(candidate);
     }
 
     private void ResultList_OnMouseDoubleClick(object sender, MouseButtonEventArgs e)
@@ -883,7 +889,27 @@ public partial class OverlayWindow : Window
 
     private void ResultList_OnKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
-        if (e.Key != Key.Enter || ResultList.SelectedItem is not FileCandidate candidate)
+        if (e.Key == Key.Down)
+        {
+            MoveSelection(+1);
+            e.Handled = true;
+            return;
+        }
+
+        if (e.Key == Key.Up)
+        {
+            MoveSelection(-1);
+            e.Handled = true;
+            return;
+        }
+
+        if (e.Key != Key.Enter)
+        {
+            return;
+        }
+
+        var candidate = GetCurrentOrFirstCandidate();
+        if (candidate is null)
         {
             return;
         }
@@ -1154,6 +1180,21 @@ public partial class OverlayWindow : Window
         }
     }
 
+    private void ListBoxItem_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ClickCount != 1 || sender is not ListBoxItem { DataContext: FileCandidate candidate })
+        {
+            return;
+        }
+
+        if (!ReferenceEquals(ResultList.SelectedItem, candidate))
+        {
+            ResultList.SelectedItem = candidate;
+        }
+
+        _ = ExecuteSingleAsync(candidate);
+    }
+
     private void TrayMenuItem_Pin_OnClick(object sender, RoutedEventArgs e)
     {
         if (sender is MenuItem menuItem && 
@@ -1256,6 +1297,42 @@ public partial class OverlayWindow : Window
         }
 
         return allowedExtensions.Contains(extension.ToLowerInvariant());
+    }
+
+    private FileCandidate? GetCurrentOrFirstCandidate()
+    {
+        return ResultList.SelectedItem as FileCandidate ?? _items.FirstOrDefault();
+    }
+
+    private void MoveSelection(int delta)
+    {
+        if (_items.Count == 0)
+        {
+            return;
+        }
+
+        var currentIndex = ResultList.SelectedIndex;
+        int nextIndex;
+
+        if (currentIndex < 0)
+        {
+            nextIndex = delta >= 0 ? 0 : _items.Count - 1;
+        }
+        else
+        {
+            nextIndex = Math.Clamp(currentIndex + delta, 0, _items.Count - 1);
+        }
+
+        if (nextIndex == currentIndex)
+        {
+            return;
+        }
+
+        ResultList.SelectedIndex = nextIndex;
+        if (ResultList.SelectedItem is FileCandidate selected)
+        {
+            ResultList.ScrollIntoView(selected);
+        }
     }
 
     private bool AreItemsEquivalent(IReadOnlyList<FileCandidate> items)
