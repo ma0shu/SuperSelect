@@ -6,9 +6,15 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
     <PlatformTarget>x64</PlatformTarget>
     <RestoreIgnoreFailedSources>true</RestoreIgnoreFailedSources>
     <NoWarn>$(NoWarn);NU1900</NoWarn>
+    <ApplicationIcon>Resources\app.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="Resources\app.ico" />
+  </ItemGroup>
 
 </Project>

@@ -5,6 +5,7 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d"
         Title="SuperSelect"
+        Icon="Resources/app.ico"
         Height="420"
         Width="680"
         MinHeight="360"

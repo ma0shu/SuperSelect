@@ -44,7 +44,22 @@ internal sealed class EverythingService
             : $"file: {keyword.Trim()}";
 
         return Task.Run(
-            () => QueryInternal(query, ToEverythingSort(sortOption), maxResults, CandidateSource.EverythingSearch, cancellationToken),
+            () => QueryInternal(query, ToEverythingSort(sortOption), maxResults, isDirectoryResult: false, CandidateSource.EverythingSearch, cancellationToken),
+            cancellationToken);
+    }
+
+    public Task<IReadOnlyList<FileCandidate>> SearchFoldersAsync(
+        string keyword,
+        EverythingSortOption sortOption,
+        int maxResults,
+        CancellationToken cancellationToken)
+    {
+        var query = string.IsNullOrWhiteSpace(keyword)
+            ? "folder:"
+            : $"folder: {keyword.Trim()}";
+
+        return Task.Run(
+            () => QueryInternal(query, ToEverythingSort(sortOption), maxResults, isDirectoryResult: true, CandidateSource.EverythingSearch, cancellationToken),
             cancellationToken);
     }
 
@@ -54,7 +69,17 @@ internal sealed class EverythingService
         CancellationToken cancellationToken)
     {
         return Task.Run(
-            () => QueryInternal("file:", ToEverythingSort(sortOption), maxResults, CandidateSource.EverythingRecent, cancellationToken),
+            () => QueryInternal("file:", ToEverythingSort(sortOption), maxResults, isDirectoryResult: false, CandidateSource.EverythingRecent, cancellationToken),
+            cancellationToken);
+    }
+
+    public Task<IReadOnlyList<FileCandidate>> RecentFoldersAsync(
+        EverythingSortOption sortOption,
+        int maxResults,
+        CancellationToken cancellationToken)
+    {
+        return Task.Run(
+            () => QueryInternal("folder:", ToEverythingSort(sortOption), maxResults, isDirectoryResult: true, CandidateSource.EverythingRecent, cancellationToken),
             cancellationToken);
     }
 
@@ -62,6 +87,7 @@ internal sealed class EverythingService
         string query,
         uint sortType,
         int maxResults,
+        bool isDirectoryResult,
         CandidateSource source,
         CancellationToken cancellationToken)
     {
@@ -121,7 +147,7 @@ internal sealed class EverythingService
                             FullPath = fullPath,
                             DisplayName = displayName,
                             SecondaryText = Path.GetDirectoryName(fullPath) ?? string.Empty,
-                            IsDirectory = false,
+                            IsDirectory = isDirectoryResult,
                             Source = source,
                         });
                 }

@@ -83,6 +83,62 @@
                 </Setter.Value>
             </Setter>
         </Style>
+
+        <Style x:Key="SlimScrollThumbStyle" TargetType="Thumb">
+            <Setter Property="Background" Value="#94A3B8" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Thumb">
+                        <Border CornerRadius="4" Background="{TemplateBinding Background}" />
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#64748B" />
+                </Trigger>
+                <Trigger Property="IsDragging" Value="True">
+                    <Setter Property="Background" Value="#475569" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="SlimScrollBarStyle" TargetType="ScrollBar">
+            <Setter Property="Width" Value="8" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ScrollBar">
+                        <Grid Width="{TemplateBinding Width}" Background="Transparent">
+                            <Track x:Name="PART_Track"
+                                   IsDirectionReversed="True"
+                                   Focusable="False">
+                                <Track.DecreaseRepeatButton>
+                                    <RepeatButton Command="ScrollBar.LineUpCommand"
+                                                  Height="0"
+                                                  Opacity="0"
+                                                  Focusable="False" />
+                                </Track.DecreaseRepeatButton>
+                                <Track.Thumb>
+                                    <Thumb Style="{StaticResource SlimScrollThumbStyle}" />
+                                </Track.Thumb>
+                                <Track.IncreaseRepeatButton>
+                                    <RepeatButton Command="ScrollBar.LineDownCommand"
+                                                  Height="0"
+                                                  Opacity="0"
+                                                  Focusable="False" />
+                                </Track.IncreaseRepeatButton>
+                            </Track>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="Orientation" Value="Horizontal">
+                    <Setter Property="Visibility" Value="Collapsed" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
     </Window.Resources>
 
     <Border x:Name="RootBorder"
@@ -195,9 +251,18 @@
                 <ListBox x:Name="ResultList"
                          Margin="2"
                          BorderThickness="0"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                         ScrollViewer.VerticalScrollBarVisibility="Auto"
+                         ScrollViewer.CanContentScroll="True"
+                         VirtualizingPanel.IsVirtualizing="True"
+                         VirtualizingPanel.VirtualizationMode="Recycling"
+                         PreviewMouseWheel="ResultList_OnPreviewMouseWheel"
                          SelectionChanged="ResultList_OnSelectionChanged"
                          MouseDoubleClick="ResultList_OnMouseDoubleClick"
                          KeyDown="ResultList_OnKeyDown">
+                    <ListBox.Resources>
+                        <Style TargetType="{x:Type ScrollBar}" BasedOn="{StaticResource SlimScrollBarStyle}" />
+                    </ListBox.Resources>
                     <ListBox.ItemTemplate>
                         <DataTemplate>
                             <StackPanel Margin="4">

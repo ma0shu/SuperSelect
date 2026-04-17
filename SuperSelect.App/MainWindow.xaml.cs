@@ -39,8 +39,8 @@ public partial class MainWindow : Window
             : "Hook 状态：未运行";
 
         EverythingStatusText.Text = _everythingService.IsAvailable
-            ? "Everything 状态：可用（需要 Everything.exe 运行，并可加载 Everything64.dll）"
-            : $"Everything 状态：不可用 - {_everythingService.LastErrorMessage}";
+            ? $"Everything 状态：可用（需要 Everything.exe 运行，并可加载 Everything64.dll）{Environment.NewLine}日志目录：{AppLogger.LogDirectoryPath}"
+            : $"Everything 状态：不可用 - {_everythingService.LastErrorMessage}{Environment.NewLine}日志目录：{AppLogger.LogDirectoryPath}";
 
         RefreshTrayList();
     }

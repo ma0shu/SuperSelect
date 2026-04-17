@@ -12,6 +12,22 @@ internal sealed class FileDialogAutomationController
     private static readonly string[] FileNameKeywords = ["file name", "filename", "文件名"];
     private static readonly string[] ConfirmKeywords = ["open", "save", "select", "打开", "保存", "选择"];
     private static readonly string[] FileTypeKeywords = ["file type", "save as type", "类型", "文件类型", "保存类型"];
+    private static readonly string[] FolderDialogTitleKeywords =
+    [
+        "select folder",
+        "choose folder",
+        "browse for folder",
+        "打开文件夹",
+        "选择文件夹",
+        "浏览文件夹",
+    ];
+    private static readonly string[] FolderConfirmKeywords =
+    [
+        "select folder",
+        "choose folder",
+        "打开文件夹",
+        "选择文件夹",
+    ];
     private static readonly Regex ExtensionRegex = new(@"\*\.[a-zA-Z0-9]+|\.[a-zA-Z0-9]+", RegexOptions.Compiled);
 
     private readonly IntPtr _dialogHwnd;
@@ -37,9 +53,18 @@ internal sealed class FileDialogAutomationController
         try
         {
             var root = AutomationElement.FromHandle(hwnd);
-            return root is not null
-                && FindFileNameEdit(root) is not null
-                && FindConfirmButton(root) is not null;
+            if (root is null)
+            {
+                return false;
+            }
+
+            var hasConfirmButton = FindConfirmButton(root) is not null;
+            if (!hasConfirmButton)
+            {
+                return false;
+            }
+
+            return FindFileNameEdit(root) is not null || HasCandidateListControl(root);
         }
         catch
         {
@@ -88,7 +113,19 @@ internal sealed class FileDialogAutomationController
         }
 
         Thread.Sleep(40);
-        return TrySetText(edit, fileName);
+        if (!TrySetText(edit, fileName))
+        {
+            return false;
+        }
+
+        Thread.Sleep(40);
+        var refreshedRoot = TryGetRoot();
+        if (refreshedRoot is not null)
+        {
+            _ = TrySelectFileInList(refreshedRoot, fileName);
+        }
+
+        return true;
     }
 
     public bool TryConfirmSelection(FileCandidate candidate)
@@ -153,14 +190,70 @@ internal sealed class FileDialogAutomationController
 
     public IReadOnlySet<string> GetAllowedFileExtensions()
     {
-        var root = TryGetRoot();
-        if (root is null)
+        try
+        {
+            var root = TryGetRoot();
+            if (root is null)
+            {
+                return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            }
+
+            var filterText = TryReadFileTypeFilterText(root);
+            return ParseExtensions(filterText);
+        }
+        catch
         {
             return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         }
+    }
 
-        var filterText = TryReadFileTypeFilterText(root);
-        return ParseExtensions(filterText);
+    public string GetCurrentFileTypeFilterText()
+    {
+        try
+        {
+            var root = TryGetRoot();
+            if (root is null)
+            {
+                return string.Empty;
+            }
+
+            return TryReadFileTypeFilterText(root) ?? string.Empty;
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    public bool IsFolderSelectionDialog()
+    {
+        try
+        {
+            var root = TryGetRoot();
+            if (root is null)
+            {
+                return false;
+            }
+
+            var title = root.Current.Name;
+            if (!string.IsNullOrWhiteSpace(title) && ContainsAny(title, FolderDialogTitleKeywords))
+            {
+                return true;
+            }
+
+            var confirm = FindConfirmButton(root);
+            var confirmText = confirm?.Current.Name;
+            if (!string.IsNullOrWhiteSpace(confirmText) && ContainsAny(confirmText, FolderConfirmKeywords))
+            {
+                return true;
+            }
+
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private void TryActivateDialog()
@@ -190,62 +283,94 @@ internal sealed class FileDialogAutomationController
 
     private static AutomationElement? FindFileNameEdit(AutomationElement root)
     {
-        var byId = root.FindFirst(
-            TreeScope.Descendants,
-            new AndCondition(
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit),
-                new PropertyCondition(AutomationElement.AutomationIdProperty, "1148")));
-
-        if (byId is not null)
+        try
         {
-            return byId;
-        }
+            var byId = root.FindFirst(
+                TreeScope.Descendants,
+                new AndCondition(
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit),
+                    new PropertyCondition(AutomationElement.AutomationIdProperty, "1148")));
 
-        var edits = root.FindAll(
-            TreeScope.Descendants,
-            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit));
-
-        for (var i = 0; i < edits.Count; i++)
-        {
-            var edit = edits[i];
-            var name = edit.Current.Name;
-            if (!string.IsNullOrWhiteSpace(name) && ContainsAny(name, FileNameKeywords))
+            if (byId is not null)
             {
-                return edit;
+                return byId;
             }
-        }
 
-        return edits.Count > 0 ? edits[edits.Count - 1] : null;
+            var edits = root.FindAll(
+                TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit));
+
+            for (var i = 0; i < edits.Count; i++)
+            {
+                var edit = edits[i];
+                string? name = null;
+                try
+                {
+                    name = edit.Current.Name;
+                }
+                catch
+                {
+                    // Ignore per-item transient UIA failure.
+                }
+
+                if (!string.IsNullOrWhiteSpace(name) && ContainsAny(name, FileNameKeywords))
+                {
+                    return edit;
+                }
+            }
+
+            return edits.Count > 0 ? edits[edits.Count - 1] : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static AutomationElement? FindConfirmButton(AutomationElement root)
     {
-        var byId = root.FindFirst(
-            TreeScope.Descendants,
-            new AndCondition(
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
-                new PropertyCondition(AutomationElement.AutomationIdProperty, "1")));
-
-        if (byId is not null)
+        try
         {
-            return byId;
-        }
+            var byId = root.FindFirst(
+                TreeScope.Descendants,
+                new AndCondition(
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
+                    new PropertyCondition(AutomationElement.AutomationIdProperty, "1")));
 
-        var buttons = root.FindAll(
-            TreeScope.Descendants,
-            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button));
-
-        for (var i = 0; i < buttons.Count; i++)
-        {
-            var button = buttons[i];
-            var name = button.Current.Name;
-            if (!string.IsNullOrWhiteSpace(name) && ContainsAny(name, ConfirmKeywords))
+            if (byId is not null)
             {
-                return button;
+                return byId;
             }
-        }
 
-        return buttons.Count > 0 ? buttons[0] : null;
+            var buttons = root.FindAll(
+                TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button));
+
+            for (var i = 0; i < buttons.Count; i++)
+            {
+                var button = buttons[i];
+                string? name = null;
+                try
+                {
+                    name = button.Current.Name;
+                }
+                catch
+                {
+                    // Ignore per-item transient UIA failure.
+                }
+
+                if (!string.IsNullOrWhiteSpace(name) && ContainsAny(name, ConfirmKeywords))
+                {
+                    return button;
+                }
+            }
+
+            return buttons.Count > 0 ? buttons[0] : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static bool TrySetText(AutomationElement edit, string value)
@@ -314,51 +439,170 @@ internal sealed class FileDialogAutomationController
         return false;
     }
 
+    private static bool HasCandidateListControl(AutomationElement root)
+    {
+        try
+        {
+            var list = root.FindFirst(
+                TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.List));
+            if (list is not null)
+            {
+                return true;
+            }
+
+            var dataGrid = root.FindFirst(
+                TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.DataGrid));
+            return dataGrid is not null;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static string? TryReadFileTypeFilterText(AutomationElement root)
     {
-        var byId = root.FindFirst(
-            TreeScope.Descendants,
-            new AndCondition(
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ComboBox),
-                new PropertyCondition(AutomationElement.AutomationIdProperty, "1136")));
-
-        if (byId is not null)
+        try
         {
-            var fromId = GetComboDisplayText(byId);
-            if (!string.IsNullOrWhiteSpace(fromId))
+            var byId = FindFileTypeComboById(root);
+            if (byId is not null)
             {
-                return fromId;
-            }
-        }
-
-        var combos = root.FindAll(
-            TreeScope.Descendants,
-            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ComboBox));
-
-        for (var i = 0; i < combos.Count; i++)
-        {
-            var combo = combos[i];
-            var name = combo.Current.Name;
-            if (!string.IsNullOrWhiteSpace(name) && ContainsAny(name, FileTypeKeywords))
-            {
-                var fromNamedCombo = GetComboDisplayText(combo);
-                if (!string.IsNullOrWhiteSpace(fromNamedCombo))
+                var fromId = GetComboDisplayText(byId);
+                if (!string.IsNullOrWhiteSpace(fromId))
                 {
-                    return fromNamedCombo;
+                    return fromId;
                 }
             }
+
+            var combos = root.FindAll(
+                TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ComboBox));
+
+            for (var i = 0; i < combos.Count; i++)
+            {
+                var combo = combos[i];
+                string? name = null;
+                try
+                {
+                    name = combo.Current.Name;
+                }
+                catch
+                {
+                    // Ignore per-item transient UIA failure.
+                }
+
+                if (!string.IsNullOrWhiteSpace(name) && ContainsAny(name, FileTypeKeywords))
+                {
+                    var fromNamedCombo = GetComboDisplayText(combo);
+                    if (!string.IsNullOrWhiteSpace(fromNamedCombo))
+                    {
+                        return fromNamedCombo;
+                    }
+                }
+            }
+
+            for (var i = 0; i < combos.Count; i++)
+            {
+                var any = GetComboDisplayText(combos[i]);
+                if (!string.IsNullOrWhiteSpace(any) && any.Contains("*.", StringComparison.OrdinalIgnoreCase))
+                {
+                    return any;
+                }
+            }
+
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static AutomationElement? FindFileTypeComboById(AutomationElement root)
+    {
+        try
+        {
+            return root.FindFirst(
+                TreeScope.Descendants,
+                new AndCondition(
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ComboBox),
+                    new PropertyCondition(AutomationElement.AutomationIdProperty, "1136")));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool TrySelectFileInList(AutomationElement root, string fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            return false;
         }
 
-        for (var i = 0; i < combos.Count; i++)
+        AutomationElementCollection items;
+        try
         {
-            var any = GetComboDisplayText(combos[i]);
-            if (!string.IsNullOrWhiteSpace(any) && any.Contains("*.", StringComparison.OrdinalIgnoreCase))
+            items = root.FindAll(
+                TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ListItem));
+        }
+        catch
+        {
+            return false;
+        }
+
+        for (var i = 0; i < items.Count; i++)
+        {
+            var item = items[i];
+            string? name = null;
+            try
             {
-                return any;
+                name = item.Current.Name?.Trim();
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(name) ||
+                !name.Equals(fileName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            try
+            {
+                if (item.TryGetCurrentPattern(ScrollItemPattern.Pattern, out var scrollObj) &&
+                    scrollObj is ScrollItemPattern scrollPattern)
+                {
+                    scrollPattern.ScrollIntoView();
+                }
+
+                if (item.TryGetCurrentPattern(SelectionItemPattern.Pattern, out var selectionObj) &&
+                    selectionObj is SelectionItemPattern selectionPattern)
+                {
+                    selectionPattern.Select();
+                    return true;
+                }
+
+                if (item.TryGetCurrentPattern(InvokePattern.Pattern, out var invokeObj) &&
+                    invokeObj is InvokePattern invokePattern)
+                {
+                    invokePattern.Invoke();
+                    return true;
+                }
+            }
+            catch
+            {
+                continue;
             }
         }
 
-        return null;
+        return false;
     }
 
     private static string? GetComboDisplayText(AutomationElement combo)
@@ -400,7 +644,14 @@ internal sealed class FileDialogAutomationController
             // Ignore and continue.
         }
 
-        return combo.Current.Name;
+        try
+        {
+            return combo.Current.Name;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static IReadOnlySet<string> ParseExtensions(string? filterText)
