@@ -1,6 +1,7 @@
 using System.IO;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Automation;
 using SuperSelect.App.Models;
 using SuperSelect.App.Native;
@@ -29,8 +30,16 @@ internal sealed class FileDialogAutomationController
         "选择文件夹",
     ];
     private static readonly Regex ExtensionRegex = new(@"\*\.[a-zA-Z0-9]+|\.[a-zA-Z0-9]+", RegexOptions.Compiled);
+    private static readonly IReadOnlySet<string> EmptyExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    private const uint AutomationMessageTimeoutMs = 300;
 
     private readonly IntPtr _dialogHwnd;
+    private readonly object _cacheSyncRoot = new();
+    private IntPtr _cachedEditHwnd;
+    private IntPtr _cachedConfirmHwnd;
+    private IntPtr _cachedFileTypeComboHwnd;
+    private string _cachedExtensionFilterText = string.Empty;
+    private IReadOnlySet<string> _cachedAllowedExtensions = EmptyExtensions;
 
     public FileDialogAutomationController(IntPtr dialogHwnd)
     {
@@ -68,6 +77,11 @@ internal sealed class FileDialogAutomationController
 
     public bool TryPrimeSelection(FileCandidate candidate)
     {
+        return TryPrimeSelectionAsync(candidate).GetAwaiter().GetResult();
+    }
+
+    public async Task<bool> TryPrimeSelectionAsync(FileCandidate candidate, CancellationToken cancellationToken = default)
+    {
         if (candidate.IsDirectory)
         {
             return TryNavigateToDirectory(candidate.FullPath);
@@ -87,10 +101,11 @@ internal sealed class FileDialogAutomationController
             return false;
         }
 
-        var edit = FindFileNameEdit(root);
-        var confirm = FindConfirmButton(root);
+        var edit = GetFileNameEdit(root);
+        var confirm = GetConfirmButton(root);
         if (edit is null || confirm is null)
         {
+            InvalidateControlCaches();
             return false;
         }
 
@@ -106,14 +121,36 @@ internal sealed class FileDialogAutomationController
             return false;
         }
 
-        Thread.Sleep(40);
+        try
+        {
+            await Task.Delay(40, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+
+        var refreshedRoot = TryGetRoot();
+        if (refreshedRoot is not null)
+        {
+            edit = GetFileNameEdit(refreshedRoot) ?? edit;
+        }
+
         if (!TrySetText(edit, fileName))
         {
             return false;
         }
 
-        Thread.Sleep(40);
-        var refreshedRoot = TryGetRoot();
+        try
+        {
+            await Task.Delay(40, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+
+        refreshedRoot = TryGetRoot();
         if (refreshedRoot is not null)
         {
             _ = TrySelectFileInList(refreshedRoot, fileName);
@@ -135,10 +172,11 @@ internal sealed class FileDialogAutomationController
             return false;
         }
 
-        var edit = FindFileNameEdit(root);
-        var confirm = FindConfirmButton(root);
+        var edit = GetFileNameEdit(root);
+        var confirm = GetConfirmButton(root);
         if (edit is null || confirm is null)
         {
+            InvalidateControlCaches();
             return false;
         }
 
@@ -165,10 +203,11 @@ internal sealed class FileDialogAutomationController
             return false;
         }
 
-        var edit = FindFileNameEdit(root);
-        var confirm = FindConfirmButton(root);
+        var edit = GetFileNameEdit(root);
+        var confirm = GetConfirmButton(root);
         if (edit is null || confirm is null)
         {
+            InvalidateControlCaches();
             return false;
         }
 
@@ -182,22 +221,44 @@ internal sealed class FileDialogAutomationController
         return TryInvoke(confirm);
     }
 
-    public IReadOnlySet<string> GetAllowedFileExtensions()
+    public IReadOnlySet<string> GetAllowedFileExtensions(string? currentFilterText = null)
     {
         try
         {
-            var root = TryGetRoot();
-            if (root is null)
+            var filterText = currentFilterText;
+            if (string.IsNullOrWhiteSpace(filterText))
             {
-                return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var root = TryGetRoot();
+                if (root is null)
+                {
+                    return EmptyExtensions;
+                }
+
+                filterText = TryReadFileTypeFilterText(root);
             }
 
-            var filterText = TryReadFileTypeFilterText(root);
-            return ParseExtensions(filterText);
+            filterText ??= string.Empty;
+
+            lock (_cacheSyncRoot)
+            {
+                if (string.Equals(filterText, _cachedExtensionFilterText, StringComparison.OrdinalIgnoreCase))
+                {
+                    return _cachedAllowedExtensions;
+                }
+            }
+
+            var parsed = ParseExtensions(filterText);
+            lock (_cacheSyncRoot)
+            {
+                _cachedExtensionFilterText = filterText;
+                _cachedAllowedExtensions = parsed;
+            }
+
+            return parsed;
         }
         catch
         {
-            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            return EmptyExtensions;
         }
     }
 
@@ -250,6 +311,7 @@ internal sealed class FileDialogAutomationController
     {
         if (_dialogHwnd == IntPtr.Zero || !NativeMethods.IsWindow(_dialogHwnd))
         {
+            InvalidateControlCaches();
             return null;
         }
 
@@ -259,7 +321,100 @@ internal sealed class FileDialogAutomationController
         }
         catch
         {
+            InvalidateControlCaches();
             return null;
+        }
+    }
+
+    private AutomationElement? GetFileNameEdit(AutomationElement root)
+    {
+        IntPtr cachedHandle;
+        lock (_cacheSyncRoot)
+        {
+            cachedHandle = _cachedEditHwnd;
+        }
+
+        var cached = TryGetElementFromHandle(cachedHandle);
+        if (cached is not null)
+        {
+            return cached;
+        }
+
+        var discovered = FindFileNameEdit(root);
+        lock (_cacheSyncRoot)
+        {
+            _cachedEditHwnd = GetNativeHandle(discovered);
+        }
+
+        return discovered;
+    }
+
+    private AutomationElement? GetConfirmButton(AutomationElement root)
+    {
+        IntPtr cachedHandle;
+        lock (_cacheSyncRoot)
+        {
+            cachedHandle = _cachedConfirmHwnd;
+        }
+
+        var cached = TryGetElementFromHandle(cachedHandle);
+        if (cached is not null)
+        {
+            return cached;
+        }
+
+        var discovered = FindConfirmButton(root);
+        lock (_cacheSyncRoot)
+        {
+            _cachedConfirmHwnd = GetNativeHandle(discovered);
+        }
+
+        return discovered;
+    }
+
+    private void InvalidateControlCaches()
+    {
+        lock (_cacheSyncRoot)
+        {
+            _cachedEditHwnd = IntPtr.Zero;
+            _cachedConfirmHwnd = IntPtr.Zero;
+            _cachedFileTypeComboHwnd = IntPtr.Zero;
+            _cachedExtensionFilterText = string.Empty;
+            _cachedAllowedExtensions = EmptyExtensions;
+        }
+    }
+
+    private static AutomationElement? TryGetElementFromHandle(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero || !NativeMethods.IsWindow(hwnd))
+        {
+            return null;
+        }
+
+        try
+        {
+            return AutomationElement.FromHandle(hwnd);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static IntPtr GetNativeHandle(AutomationElement? element)
+    {
+        if (element is null)
+        {
+            return IntPtr.Zero;
+        }
+
+        try
+        {
+            return new IntPtr(element.Current.NativeWindowHandle);
+        }
+        catch
+        {
+            return IntPtr.Zero;
         }
     }
 
@@ -371,18 +526,20 @@ internal sealed class FileDialogAutomationController
     {
         try
         {
+            var hwnd = new IntPtr(edit.Current.NativeWindowHandle);
+            if (hwnd != IntPtr.Zero)
+            {
+                if (TrySendTextViaMessage(hwnd, value))
+                {
+                    return true;
+                }
+            }
+
             if (edit.TryGetCurrentPattern(ValuePattern.Pattern, out var patternObj) &&
                 patternObj is ValuePattern valuePattern &&
                 !valuePattern.Current.IsReadOnly)
             {
                 valuePattern.SetValue(value);
-                return true;
-            }
-
-            var hwnd = new IntPtr(edit.Current.NativeWindowHandle);
-            if (hwnd != IntPtr.Zero)
-            {
-                _ = NativeMethods.SendMessage(hwnd, NativeMethods.WM_SETTEXT, IntPtr.Zero, value);
                 return true;
             }
         }
@@ -398,17 +555,19 @@ internal sealed class FileDialogAutomationController
     {
         try
         {
+            var hwnd = new IntPtr(button.Current.NativeWindowHandle);
+            if (hwnd != IntPtr.Zero)
+            {
+                if (NativeMethods.PostMessage(hwnd, NativeMethods.BM_CLICK, IntPtr.Zero, IntPtr.Zero))
+                {
+                    return true;
+                }
+            }
+
             if (button.TryGetCurrentPattern(InvokePattern.Pattern, out var patternObj) &&
                 patternObj is InvokePattern invokePattern)
             {
                 invokePattern.Invoke();
-                return true;
-            }
-
-            var hwnd = new IntPtr(button.Current.NativeWindowHandle);
-            if (hwnd != IntPtr.Zero)
-            {
-                _ = NativeMethods.SendMessage(hwnd, NativeMethods.BM_CLICK, IntPtr.Zero, IntPtr.Zero);
                 return true;
             }
         }
@@ -418,6 +577,20 @@ internal sealed class FileDialogAutomationController
         }
 
         return false;
+    }
+
+    private static bool TrySendTextViaMessage(IntPtr hwnd, string value)
+    {
+        var result = NativeMethods.SendMessageTimeout(
+            hwnd,
+            (uint)NativeMethods.WM_SETTEXT,
+            IntPtr.Zero,
+            value,
+            NativeMethods.SMTO_ABORTIFHUNG,
+            AutomationMessageTimeoutMs,
+            out _);
+
+        return result != IntPtr.Zero;
     }
 
     private static bool ContainsAny(string value, IReadOnlyList<string> keywords)
@@ -456,13 +629,34 @@ internal sealed class FileDialogAutomationController
         }
     }
 
-    private static string? TryReadFileTypeFilterText(AutomationElement root)
+    private string? TryReadFileTypeFilterText(AutomationElement root)
     {
         try
         {
+            IntPtr cachedComboHandle;
+            lock (_cacheSyncRoot)
+            {
+                cachedComboHandle = _cachedFileTypeComboHwnd;
+            }
+
+            var cachedCombo = TryGetElementFromHandle(cachedComboHandle);
+            if (cachedCombo is not null)
+            {
+                var cachedText = GetComboDisplayText(cachedCombo);
+                if (!string.IsNullOrWhiteSpace(cachedText))
+                {
+                    return cachedText;
+                }
+            }
+
             var byId = FindFileTypeComboById(root);
             if (byId is not null)
             {
+                lock (_cacheSyncRoot)
+                {
+                    _cachedFileTypeComboHwnd = GetNativeHandle(byId);
+                }
+
                 var fromId = GetComboDisplayText(byId);
                 if (!string.IsNullOrWhiteSpace(fromId))
                 {
@@ -492,6 +686,11 @@ internal sealed class FileDialogAutomationController
                     var fromNamedCombo = GetComboDisplayText(combo);
                     if (!string.IsNullOrWhiteSpace(fromNamedCombo))
                     {
+                        lock (_cacheSyncRoot)
+                        {
+                            _cachedFileTypeComboHwnd = GetNativeHandle(combo);
+                        }
+
                         return fromNamedCombo;
                     }
                 }
@@ -499,9 +698,15 @@ internal sealed class FileDialogAutomationController
 
             for (var i = 0; i < combos.Count; i++)
             {
-                var any = GetComboDisplayText(combos[i]);
+                var combo = combos[i];
+                var any = GetComboDisplayText(combo);
                 if (!string.IsNullOrWhiteSpace(any) && any.Contains("*.", StringComparison.OrdinalIgnoreCase))
                 {
+                    lock (_cacheSyncRoot)
+                    {
+                        _cachedFileTypeComboHwnd = GetNativeHandle(combo);
+                    }
+
                     return any;
                 }
             }
@@ -510,6 +715,10 @@ internal sealed class FileDialogAutomationController
         }
         catch
         {
+            lock (_cacheSyncRoot)
+            {
+                _cachedFileTypeComboHwnd = IntPtr.Zero;
+            }
             return null;
         }
     }
@@ -650,19 +859,19 @@ internal sealed class FileDialogAutomationController
 
     private static IReadOnlySet<string> ParseExtensions(string? filterText)
     {
-        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (string.IsNullOrWhiteSpace(filterText))
         {
-            return result;
+            return EmptyExtensions;
         }
 
         if (filterText.Contains("*.*", StringComparison.OrdinalIgnoreCase) ||
             filterText.Contains("all files", StringComparison.OrdinalIgnoreCase) ||
             filterText.Contains("所有文件", StringComparison.OrdinalIgnoreCase))
         {
-            return result;
+            return EmptyExtensions;
         }
 
+        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var matches = ExtensionRegex.Matches(filterText);
         foreach (Match match in matches)
         {
@@ -690,6 +899,6 @@ internal sealed class FileDialogAutomationController
             }
         }
 
-        return result;
+        return result.Count == 0 ? EmptyExtensions : result;
     }
 }

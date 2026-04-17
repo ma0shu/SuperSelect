@@ -10,6 +10,8 @@ internal sealed class EverythingService
     private readonly object _syncRoot = new();
     private bool _isAvailable = true;
     private string _lastErrorMessage = string.Empty;
+    [ThreadStatic]
+    private static StringBuilder? _threadPathBuilder;
 
     public bool IsAvailable
     {
@@ -48,6 +50,22 @@ internal sealed class EverythingService
             cancellationToken);
     }
 
+    public Task<IReadOnlyList<FileCandidate>> SearchFilesPageAsync(
+        string keyword,
+        EverythingSortOption sortOption,
+        int offset,
+        int pageSize,
+        CancellationToken cancellationToken)
+    {
+        var query = string.IsNullOrWhiteSpace(keyword)
+            ? "file:"
+            : $"file: {keyword.Trim()}";
+
+        return Task.Run(
+            () => QueryPageInternal(query, ToEverythingSort(sortOption), offset, pageSize, isDirectoryResult: false, CandidateSource.EverythingSearch, cancellationToken),
+            cancellationToken);
+    }
+
     public Task<IReadOnlyList<FileCandidate>> SearchFoldersAsync(
         string keyword,
         EverythingSortOption sortOption,
@@ -63,6 +81,22 @@ internal sealed class EverythingService
             cancellationToken);
     }
 
+    public Task<IReadOnlyList<FileCandidate>> SearchFoldersPageAsync(
+        string keyword,
+        EverythingSortOption sortOption,
+        int offset,
+        int pageSize,
+        CancellationToken cancellationToken)
+    {
+        var query = string.IsNullOrWhiteSpace(keyword)
+            ? "folder:"
+            : $"folder: {keyword.Trim()}";
+
+        return Task.Run(
+            () => QueryPageInternal(query, ToEverythingSort(sortOption), offset, pageSize, isDirectoryResult: true, CandidateSource.EverythingSearch, cancellationToken),
+            cancellationToken);
+    }
+
     public Task<IReadOnlyList<FileCandidate>> RecentFilesAsync(
         EverythingSortOption sortOption,
         int maxResults,
@@ -70,6 +104,17 @@ internal sealed class EverythingService
     {
         return Task.Run(
             () => QueryInternal("file:", ToEverythingSort(sortOption), maxResults, isDirectoryResult: false, CandidateSource.EverythingRecent, cancellationToken),
+            cancellationToken);
+    }
+
+    public Task<IReadOnlyList<FileCandidate>> RecentFilesPageAsync(
+        EverythingSortOption sortOption,
+        int offset,
+        int pageSize,
+        CancellationToken cancellationToken)
+    {
+        return Task.Run(
+            () => QueryPageInternal("file:", ToEverythingSort(sortOption), offset, pageSize, isDirectoryResult: false, CandidateSource.EverythingRecent, cancellationToken),
             cancellationToken);
     }
 
@@ -83,6 +128,60 @@ internal sealed class EverythingService
             cancellationToken);
     }
 
+    public Task<IReadOnlyList<FileCandidate>> RecentFoldersPageAsync(
+        EverythingSortOption sortOption,
+        int offset,
+        int pageSize,
+        CancellationToken cancellationToken)
+    {
+        return Task.Run(
+            () => QueryPageInternal("folder:", ToEverythingSort(sortOption), offset, pageSize, isDirectoryResult: true, CandidateSource.EverythingRecent, cancellationToken),
+            cancellationToken);
+    }
+
+    public Task<(IReadOnlyList<FileCandidate> Items, int RawCount)> SearchFilesFilteredPageAsync(
+        string keyword,
+        EverythingSortOption sortOption,
+        int offset,
+        int pageSize,
+        IReadOnlySet<string> allowedExtensions,
+        CancellationToken cancellationToken)
+    {
+        var query = string.IsNullOrWhiteSpace(keyword)
+            ? "file:"
+            : $"file: {keyword.Trim()}";
+
+        return Task.Run(
+            () => QueryPageFilteredInternal(
+                query,
+                ToEverythingSort(sortOption),
+                offset,
+                pageSize,
+                CandidateSource.EverythingSearch,
+                allowedExtensions,
+                cancellationToken),
+            cancellationToken);
+    }
+
+    public Task<(IReadOnlyList<FileCandidate> Items, int RawCount)> RecentFilesFilteredPageAsync(
+        EverythingSortOption sortOption,
+        int offset,
+        int pageSize,
+        IReadOnlySet<string> allowedExtensions,
+        CancellationToken cancellationToken)
+    {
+        return Task.Run(
+            () => QueryPageFilteredInternal(
+                "file:",
+                ToEverythingSort(sortOption),
+                offset,
+                pageSize,
+                CandidateSource.EverythingRecent,
+                allowedExtensions,
+                cancellationToken),
+            cancellationToken);
+    }
+
     private IReadOnlyList<FileCandidate> QueryInternal(
         string query,
         uint sortType,
@@ -91,6 +190,28 @@ internal sealed class EverythingService
         CandidateSource source,
         CancellationToken cancellationToken)
     {
+        return QueryPageInternal(
+            query,
+            sortType,
+            offset: 0,
+            maxResults: maxResults,
+            isDirectoryResult: isDirectoryResult,
+            source: source,
+            cancellationToken: cancellationToken);
+    }
+
+    private IReadOnlyList<FileCandidate> QueryPageInternal(
+        string query,
+        uint sortType,
+        int offset,
+        int maxResults,
+        bool isDirectoryResult,
+        CandidateSource source,
+        CancellationToken cancellationToken)
+    {
+        var boundedOffset = Math.Max(0, offset);
+        var boundedMaxResults = Math.Clamp(maxResults, 1, 20000);
+
         lock (_syncRoot)
         {
             if (!EnsureAvailableLocked())
@@ -105,8 +226,8 @@ internal sealed class EverythingService
                 Native.Everything_SetRegex(false);
                 Native.Everything_SetRequestFlags(RequestFlags.FullPathAndFileName);
                 Native.Everything_SetSort(sortType);
-                Native.Everything_SetOffset(0);
-                Native.Everything_SetMax((uint)Math.Max(1, maxResults));
+                Native.Everything_SetOffset((uint)boundedOffset);
+                Native.Everything_SetMax((uint)boundedMaxResults);
                 Native.Everything_SetSearchW(query);
 
                 if (!Native.Everything_QueryW(true))
@@ -117,8 +238,8 @@ internal sealed class EverythingService
                 }
 
                 var count = (int)Native.Everything_GetNumResults();
-                var result = new List<FileCandidate>(Math.Min(count, maxResults));
-                var builder = new StringBuilder(4096);
+                var result = new List<FileCandidate>(Math.Min(count, boundedMaxResults));
+                var builder = GetPathBuilder();
 
                 for (var i = 0; i < count; i++)
                 {
@@ -171,6 +292,133 @@ internal sealed class EverythingService
                 return [];
             }
         }
+    }
+
+    private (IReadOnlyList<FileCandidate> Items, int RawCount) QueryPageFilteredInternal(
+        string query,
+        uint sortType,
+        int offset,
+        int maxResults,
+        CandidateSource source,
+        IReadOnlySet<string> allowedExtensions,
+        CancellationToken cancellationToken)
+    {
+        var boundedOffset = Math.Max(0, offset);
+        var boundedMaxResults = Math.Clamp(maxResults, 1, 20000);
+        var canFilterByExtensions = allowedExtensions.Count > 0;
+
+        lock (_syncRoot)
+        {
+            if (!EnsureAvailableLocked())
+            {
+                return ([], 0);
+            }
+
+            try
+            {
+                Native.Everything_SetMatchPath(false);
+                Native.Everything_SetMatchCase(false);
+                Native.Everything_SetRegex(false);
+                Native.Everything_SetRequestFlags(RequestFlags.FullPathAndFileName);
+                Native.Everything_SetSort(sortType);
+                Native.Everything_SetOffset((uint)boundedOffset);
+                Native.Everything_SetMax((uint)boundedMaxResults);
+                Native.Everything_SetSearchW(query);
+
+                if (!Native.Everything_QueryW(true))
+                {
+                    var errorCode = Native.Everything_GetLastError();
+                    _lastErrorMessage = $"查询失败（错误码: {errorCode}）";
+                    return ([], 0);
+                }
+
+                var rawCount = (int)Native.Everything_GetNumResults();
+                var result = new List<FileCandidate>(Math.Min(rawCount, boundedMaxResults));
+                var builder = GetPathBuilder();
+
+                for (var i = 0; i < rawCount; i++)
+                {
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        return ([], 0);
+                    }
+
+                    builder.Clear();
+                    Native.Everything_GetResultFullPathNameW((uint)i, builder, (uint)builder.Capacity);
+
+                    var fullPath = builder.ToString();
+                    if (string.IsNullOrWhiteSpace(fullPath))
+                    {
+                        continue;
+                    }
+
+                    if (canFilterByExtensions && !HasAllowedExtension(fullPath, allowedExtensions))
+                    {
+                        continue;
+                    }
+
+                    var displayName = Path.GetFileName(fullPath);
+                    if (string.IsNullOrWhiteSpace(displayName))
+                    {
+                        displayName = fullPath;
+                    }
+
+                    result.Add(
+                        new FileCandidate
+                        {
+                            FullPath = fullPath,
+                            DisplayName = displayName,
+                            SecondaryText = Path.GetDirectoryName(fullPath) ?? string.Empty,
+                            IsDirectory = false,
+                            Source = source,
+                        });
+                }
+
+                return (result, rawCount);
+            }
+            catch (DllNotFoundException)
+            {
+                SetUnavailableLocked("Everything64.dll 未找到。请把 SDK DLL 放到可执行程序目录，或加入系统 PATH。");
+                return ([], 0);
+            }
+            catch (EntryPointNotFoundException)
+            {
+                SetUnavailableLocked("Everything SDK 接口不可用。请确认 DLL 版本与程序架构一致（x64）。");
+                return ([], 0);
+            }
+            catch (Exception ex)
+            {
+                _lastErrorMessage = ex.Message;
+                return ([], 0);
+            }
+        }
+    }
+
+    private static StringBuilder GetPathBuilder()
+    {
+        var builder = _threadPathBuilder;
+        if (builder is null)
+        {
+            builder = new StringBuilder(4096);
+            _threadPathBuilder = builder;
+        }
+        else if (builder.Capacity < 4096)
+        {
+            _ = builder.EnsureCapacity(4096);
+        }
+
+        return builder;
+    }
+
+    private static bool HasAllowedExtension(string fullPath, IReadOnlySet<string> allowedExtensions)
+    {
+        var extension = Path.GetExtension(fullPath);
+        if (string.IsNullOrWhiteSpace(extension))
+        {
+            return false;
+        }
+
+        return allowedExtensions.Contains(extension.ToLowerInvariant());
     }
 
     private bool EnsureAvailableLocked()

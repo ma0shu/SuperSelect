@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.IO;
 using System.Text;
+using System.Threading;
 
 namespace SuperSelect.App.Services;
 
@@ -10,7 +11,18 @@ internal static class AppLogger
     private static readonly ConcurrentDictionary<string, DateTime> LastExceptionLogByKey =
         new(StringComparer.OrdinalIgnoreCase);
 
+    private static readonly ConcurrentQueue<(DateTime Timestamp, string Level, string Message)> PendingEntries = new();
+    private static readonly AutoResetEvent FlushSignal = new(false);
+    private static readonly CancellationTokenSource FlushCts = new();
+    private static readonly Task FlushWorker = Task.Run(FlushLoop);
+
     private static readonly string LogDirectory = InitializeLogDirectory();
+    private static int _throttleCleanupCounter;
+
+    static AppLogger()
+    {
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => StopFlushWorker();
+    }
 
     public static string LogDirectoryPath => LogDirectory;
 
@@ -45,13 +57,62 @@ internal static class AppLogger
     {
         try
         {
-            var logPath = GetLogFilePath(DateTime.Now);
-            var line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [{level}] [PID:{Environment.ProcessId}] {message}";
+            PendingEntries.Enqueue((DateTime.Now, level, message));
+            FlushSignal.Set();
+        }
+        catch
+        {
+            // Logging failures must never crash the app.
+        }
+    }
 
+    private static void FlushLoop()
+    {
+        while (!FlushCts.IsCancellationRequested)
+        {
+            _ = FlushSignal.WaitOne(500);
+            FlushPending();
+        }
+
+        FlushPending();
+    }
+
+    private static void FlushPending()
+    {
+        if (PendingEntries.IsEmpty)
+        {
+            return;
+        }
+
+        var grouped = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        while (PendingEntries.TryDequeue(out var entry))
+        {
+            var logPath = GetLogFilePath(entry.Timestamp);
+            var line = $"{entry.Timestamp:yyyy-MM-dd HH:mm:ss.fff} [{entry.Level}] [PID:{Environment.ProcessId}] {entry.Message}";
+
+            if (!grouped.TryGetValue(logPath, out var lines))
+            {
+                lines = [];
+                grouped[logPath] = lines;
+            }
+
+            lines.Add(line);
+        }
+
+        if (grouped.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
             lock (SyncRoot)
             {
                 Directory.CreateDirectory(LogDirectory);
-                File.AppendAllText(logPath, line + Environment.NewLine, Encoding.UTF8);
+                foreach (var pair in grouped)
+                {
+                    File.AppendAllLines(pair.Key, pair.Value, Encoding.UTF8);
+                }
             }
         }
         catch
@@ -72,7 +133,49 @@ internal static class AppLogger
         }
 
         LastExceptionLogByKey[key] = now;
+        MaybeCleanupThrottleMap(now);
         return false;
+    }
+
+    private static void MaybeCleanupThrottleMap(DateTime nowUtc)
+    {
+        if (LastExceptionLogByKey.Count <= 2048)
+        {
+            return;
+        }
+
+        var tick = Interlocked.Increment(ref _throttleCleanupCounter);
+        if ((tick & 0xFF) != 0)
+        {
+            return;
+        }
+
+        var expiry = nowUtc - TimeSpan.FromHours(6);
+        foreach (var pair in LastExceptionLogByKey)
+        {
+            if (pair.Value < expiry)
+            {
+                _ = LastExceptionLogByKey.TryRemove(pair.Key, out _);
+            }
+        }
+    }
+
+    private static void StopFlushWorker()
+    {
+        try
+        {
+            FlushCts.Cancel();
+            FlushSignal.Set();
+            _ = FlushWorker.Wait(1500);
+        }
+        catch
+        {
+            // Ignore shutdown races.
+        }
+        finally
+        {
+            FlushPending();
+        }
     }
 
     private static string InitializeLogDirectory()
@@ -88,7 +191,7 @@ internal static class AppLogger
         }
         catch
         {
-            // ignore
+            // Ignore.
         }
 
         return root;

@@ -1,4 +1,3 @@
-using System.ComponentModel;
 using System.Drawing;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -21,10 +20,12 @@ public partial class App : System.Windows.Application
     private TrayRepository? _trayRepository;
     private ExplorerWindowService? _explorerWindowService;
     private UserPreferencesRepository? _preferencesRepository;
+    private DateTime _lastMemoryTrimUtc = DateTime.MinValue;
 
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        ShutdownMode = ShutdownMode.OnExplicitShutdown;
         DispatcherUnhandledException += OnDispatcherUnhandledException;
         AppDomain.CurrentDomain.UnhandledException += OnAppDomainUnhandledException;
         TaskScheduler.UnobservedTaskException += OnTaskSchedulerUnobservedTaskException;
@@ -43,11 +44,6 @@ public partial class App : System.Windows.Application
         _dialogWatcher.ActiveDialogMoved += OnActiveDialogMoved;
         _dialogWatcher.Start();
 
-        var mainWindow = new MainWindow(_dialogWatcher, _everythingService, _trayRepository);
-        mainWindow.Closing += MainWindow_OnClosing;
-        MainWindow = mainWindow;
-        mainWindow.Show();
-
         _trayIcon = new AppTrayIcon(LoadAppIcon());
         _trayIcon.OpenRequested += OnTrayOpenRequested;
         _trayIcon.ExitRequested += OnTrayExitRequested;
@@ -55,6 +51,7 @@ public partial class App : System.Windows.Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _isExitRequested = true;
         DispatcherUnhandledException -= OnDispatcherUnhandledException;
         AppDomain.CurrentDomain.UnhandledException -= OnAppDomainUnhandledException;
         TaskScheduler.UnobservedTaskException -= OnTaskSchedulerUnobservedTaskException;
@@ -76,26 +73,37 @@ public partial class App : System.Windows.Application
 
         if (_overlayWindow is not null)
         {
-            _overlayWindow.Close();
+            _overlayWindow.Shutdown();
+            _overlayWindow = null;
+        }
+
+        if (MainWindow is Window mainWindow)
+        {
+            mainWindow.Closed -= MainWindow_OnClosed;
+            MainWindow = null;
         }
 
         AppLogger.LogInfo("Application exit.");
         base.OnExit(e);
     }
 
-    private void MainWindow_OnClosing(object? sender, CancelEventArgs e)
+    private void MainWindow_OnClosed(object? sender, EventArgs e)
     {
-        if (_isExitRequested || MainWindow is null)
+        if (ReferenceEquals(MainWindow, sender))
         {
-            return;
+            MainWindow = null;
         }
 
-        e.Cancel = true;
-        MainWindow.Hide();
+        RequestMemoryTrim("MainWindowClosed");
     }
 
     private void OnActiveDialogChanged(IntPtr? hwnd)
     {
+        if (_isExitRequested)
+        {
+            return;
+        }
+
         if (_overlayWindow is null)
         {
             return;
@@ -108,10 +116,19 @@ public partial class App : System.Windows.Application
         }
 
         _overlayWindow.DetachDialog();
+        if (MainWindow is null)
+        {
+            RequestMemoryTrim("DialogDetached");
+        }
     }
 
     private void OnActiveDialogMoved(IntPtr hwnd)
     {
+        if (_isExitRequested)
+        {
+            return;
+        }
+
         _overlayWindow?.RepositionToDialog();
     }
 
@@ -127,10 +144,17 @@ public partial class App : System.Windows.Application
 
     private void ShowMainWindow()
     {
-        if (MainWindow is not Window window)
+        if (_isExitRequested)
         {
             return;
         }
+
+        if (_dialogWatcher is null || _everythingService is null || _trayRepository is null)
+        {
+            return;
+        }
+
+        var window = EnsureMainWindow(_dialogWatcher, _everythingService, _trayRepository);
 
         if (!window.IsVisible)
         {
@@ -145,16 +169,84 @@ public partial class App : System.Windows.Application
         _ = window.Activate();
     }
 
+    private MainWindow EnsureMainWindow(
+        WinEventFileDialogWatcher watcher,
+        EverythingService everythingService,
+        TrayRepository trayRepository)
+    {
+        if (MainWindow is MainWindow existing)
+        {
+            return existing;
+        }
+
+        var created = new MainWindow(watcher, everythingService, trayRepository);
+        created.Closed += MainWindow_OnClosed;
+        MainWindow = created;
+        return created;
+    }
+
     private void ExitApplication()
     {
         _isExitRequested = true;
+
+        if (_dialogWatcher is not null)
+        {
+            _dialogWatcher.ActiveDialogChanged -= OnActiveDialogChanged;
+            _dialogWatcher.ActiveDialogMoved -= OnActiveDialogMoved;
+            _dialogWatcher.Dispose();
+            _dialogWatcher = null;
+        }
+
+        if (_overlayWindow is not null)
+        {
+            _overlayWindow.Shutdown();
+            _overlayWindow = null;
+        }
+
         if (MainWindow is not null)
         {
-            MainWindow.Closing -= MainWindow_OnClosing;
+            MainWindow.Closed -= MainWindow_OnClosed;
             MainWindow.Close();
+            MainWindow = null;
         }
 
         Shutdown();
+    }
+
+    private void RequestMemoryTrim(string reason)
+    {
+        if (_isExitRequested)
+        {
+            return;
+        }
+
+        var nowUtc = DateTime.UtcNow;
+        if (nowUtc - _lastMemoryTrimUtc < TimeSpan.FromSeconds(10))
+        {
+            return;
+        }
+
+        _lastMemoryTrimUtc = nowUtc;
+        _ = Task.Run(() => TrimProcessMemory(reason));
+    }
+
+    private static void TrimProcessMemory(string reason)
+    {
+        try
+        {
+            System.Runtime.GCSettings.LargeObjectHeapCompactionMode =
+                System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+            GC.WaitForPendingFinalizers();
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+
+            _ = Native.NativeMethods.EmptyWorkingSet(Native.NativeMethods.GetCurrentProcess());
+            AppLogger.LogInfo($"Background memory trim executed: {reason}");
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogException("App.TrimProcessMemory", ex, throttle: TimeSpan.FromSeconds(5));
+        }
     }
 
     private static Icon LoadAppIcon()

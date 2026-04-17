@@ -116,33 +116,36 @@ internal sealed class TrayRepository
     public IReadOnlyList<FileCandidate> Query(string keyword)
     {
         var filter = keyword.Trim();
+        List<string> snapshot;
 
         lock (_syncRoot)
         {
-            var query = _paths.Where(path => string.IsNullOrWhiteSpace(filter) || PathMatches(path, filter));
-            
-            // If filtering, sort by match quality, otherwise keep order
-            if (!string.IsNullOrWhiteSpace(filter))
-            {
-                query = query.OrderBy(path => Path.GetFileName(path), StringComparer.OrdinalIgnoreCase);
-            }
-
-            return query
-                .Select(
-                    path =>
-                    {
-                        var fileName = Path.GetFileName(path);
-                        return new FileCandidate
-                        {
-                            FullPath = path,
-                            DisplayName = string.IsNullOrWhiteSpace(fileName) ? path : fileName,
-                            SecondaryText = Path.GetDirectoryName(path) ?? string.Empty,
-                            IsDirectory = Directory.Exists(path),
-                            Source = CandidateSource.Tray,
-                        };
-                    })
-                .ToList();
+            snapshot = _paths.ToList();
         }
+
+        var query = snapshot.Where(path => string.IsNullOrWhiteSpace(filter) || PathMatches(path, filter));
+
+        // If filtering, sort by match quality, otherwise keep original order.
+        if (!string.IsNullOrWhiteSpace(filter))
+        {
+            query = query.OrderBy(path => Path.GetFileName(path), StringComparer.OrdinalIgnoreCase);
+        }
+
+        return query
+            .Select(
+                path =>
+                {
+                    var fileName = Path.GetFileName(path);
+                    return new FileCandidate
+                    {
+                        FullPath = path,
+                        DisplayName = string.IsNullOrWhiteSpace(fileName) ? path : fileName,
+                        SecondaryText = Path.GetDirectoryName(path) ?? string.Empty,
+                        IsDirectory = Directory.Exists(path),
+                        Source = CandidateSource.Tray,
+                    };
+                })
+            .ToList();
     }
 
     private List<string> Load()

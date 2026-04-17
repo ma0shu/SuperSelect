@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
@@ -22,7 +23,12 @@ public partial class OverlayWindow : Window
     private const double MinUsableHeightDip = 66.0;
     private const double HeaderAndStatusHeightDip = 112.0;
     private const int OverlayGapPx = 0;
-    private const int QueryResultLimit = 5000;
+    private const int InitialQueryResultLimit = 320;
+    private const int ExpandedQueryResultLimit = 1200;
+    private const int ExpandedTypeFilterQueryResultLimit = 5000;
+    private const int DisplayResultLimit = 400;
+    private const int TypeFilterScanPageSize = 2000;
+    private const int AutomationActionTimeoutMs = 900;
 
     private readonly EverythingService _everythingService;
     private readonly TrayRepository _trayRepository;
@@ -32,8 +38,10 @@ public partial class OverlayWindow : Window
     private readonly DispatcherTimer _searchDebounceTimer;
     private readonly DispatcherTimer _dialogMonitorTimer;
     private readonly List<OptionItem<EverythingSortOption>> _sortOptions;
+    private readonly SemaphoreSlim _automationOperationGate = new(1, 1);
 
     private CancellationTokenSource? _refreshCts;
+    private CancellationTokenSource? _singleSelectCts;
     private FileDialogAutomationController? _dialogController;
     private ScrollViewer? _resultListScrollViewer;
     private IntPtr _dialogHwnd;
@@ -44,6 +52,9 @@ public partial class OverlayWindow : Window
     private bool _preferredTypeFilterEnabled;
     private bool _isFolderDialog;
     private string _lastFileTypeFilterText = string.Empty;
+    private int _dialogMonitorInFlight;
+    private long _singleSelectVersion;
+    private bool _allowClose;
 
     internal OverlayWindow(
         EverythingService everythingService,
@@ -91,6 +102,7 @@ public partial class OverlayWindow : Window
     {
         _dialogHwnd = dialogHwnd;
         _dialogController = new FileDialogAutomationController(dialogHwnd);
+        Interlocked.Increment(ref _singleSelectVersion);
         
         Task.Run(() =>
         {
@@ -130,12 +142,14 @@ public partial class OverlayWindow : Window
         _dialogController = null;
         _wheelDeltaAccumulator = 0;
         _dialogMonitorTimer.Stop();
+        Interlocked.Exchange(ref _dialogMonitorInFlight, 0);
         _isFolderDialog = false;
         _lastFileTypeFilterText = string.Empty;
         ApplyModeUiState();
+        Interlocked.Increment(ref _singleSelectVersion);
 
-        _refreshCts?.Cancel();
-        _refreshCts = null;
+        CancelAndDisposeRefreshCts();
+        CancelAndDisposeSingleSelectCts();
 
         _items.Clear();
         SearchBox.Text = string.Empty;
@@ -164,6 +178,26 @@ public partial class OverlayWindow : Window
         PositionToDialog();
     }
 
+    public void Shutdown()
+    {
+        _allowClose = true;
+        CancelAndDisposeRefreshCts();
+        CancelAndDisposeSingleSelectCts();
+        Close();
+    }
+
+    protected override void OnClosing(CancelEventArgs e)
+    {
+        if (_allowClose)
+        {
+            base.OnClosing(e);
+            return;
+        }
+
+        e.Cancel = true;
+        DetachDialog();
+    }
+
     private async Task RefreshCandidatesAsync(bool immediate = false)
     {
         if (_dialogController is null)
@@ -171,9 +205,7 @@ public partial class OverlayWindow : Window
             return;
         }
 
-        _refreshCts?.Cancel();
-        _refreshCts = new CancellationTokenSource();
-        var token = _refreshCts.Token;
+        var token = ReplaceRefreshToken();
 
         var mode = _currentMode;
         var keyword = SearchBox.Text.Trim();
@@ -188,12 +220,166 @@ public partial class OverlayWindow : Window
 
         if (!immediate)
         {
-            await Task.Delay(1, token);
+            try
+            {
+                await Task.Delay(15, token);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
         }
 
+        var initialOutcome = await QueryCandidatesByModeAsync(mode, keyword, sort, InitialQueryResultLimit, token);
+        if (initialOutcome is null || token.IsCancellationRequested)
+        {
+            return;
+        }
+
+        var (initialFilteredItems, initialStatus) = ApplyTypeFilter(initialOutcome.Value.Items, initialOutcome.Value.StatusMessage, initialOutcome.Value.CanApplyTypeFilter, initialOutcome.Value.Caption);
+        var (initialDisplayItems, initialTrimmed) = CapDisplayItems(initialFilteredItems);
+        SetStatus(BuildStatus(initialStatus, initialTrimmed, expandedScan: false));
+        UpdateItems(initialDisplayItems);
+
+        var expandedLimit = IsTypeFilterActive ? ExpandedTypeFilterQueryResultLimit : ExpandedQueryResultLimit;
+        var shouldExpand =
+            mode is OverlayMode.Search or OverlayMode.Recent &&
+            expandedLimit > InitialQueryResultLimit &&
+            initialOutcome.Value.Items.Count >= InitialQueryResultLimit &&
+            (IsTypeFilterActive || initialDisplayItems.Count < DisplayResultLimit);
+
+        if (!shouldExpand)
+        {
+            return;
+        }
+
+        if (IsTypeFilterActive &&
+            initialOutcome.Value.CanApplyTypeFilter &&
+            mode is OverlayMode.Search or OverlayMode.Recent &&
+            _dialogController is not null)
+        {
+            var allowedExtensions = _dialogController.GetAllowedFileExtensions(_lastFileTypeFilterText);
+            if (allowedExtensions.Count > 0)
+            {
+                var pagedOutcome = await QueryTypeFilteredCandidatesByPagingAsync(
+                    mode,
+                    keyword,
+                    sort,
+                    initialOutcome.Value.Caption,
+                    allowedExtensions,
+                    token);
+
+                if (pagedOutcome is not null && !token.IsCancellationRequested)
+                {
+                    SetStatus(pagedOutcome.Value.StatusMessage);
+                    UpdateItems(pagedOutcome.Value.Items);
+                }
+
+                return;
+            }
+        }
+
+        var expandedOutcome = await QueryCandidatesByModeAsync(mode, keyword, sort, expandedLimit, token);
+        if (expandedOutcome is null || token.IsCancellationRequested)
+        {
+            return;
+        }
+
+        var (expandedFilteredItems, expandedStatus) = ApplyTypeFilter(expandedOutcome.Value.Items, expandedOutcome.Value.StatusMessage, expandedOutcome.Value.CanApplyTypeFilter, expandedOutcome.Value.Caption);
+        var (expandedDisplayItems, expandedTrimmed) = CapDisplayItems(expandedFilteredItems);
+        SetStatus(BuildStatus(expandedStatus, expandedTrimmed, expandedScan: true));
+        UpdateItems(expandedDisplayItems);
+    }
+
+    private async Task<(IReadOnlyList<FileCandidate> Items, string StatusMessage)?> QueryTypeFilteredCandidatesByPagingAsync(
+        OverlayMode mode,
+        string keyword,
+        EverythingSortOption sort,
+        string caption,
+        IReadOnlySet<string> allowedExtensions,
+        CancellationToken token)
+    {
+        var result = new List<FileCandidate>(DisplayResultLimit);
+        var offset = 0;
+        var exhausted = false;
+        var scannedPages = 0;
+
+        while (!token.IsCancellationRequested)
+        {
+            var pageResult = await QueryEverythingTypeFilteredPageByModeAsync(
+                mode,
+                keyword,
+                sort,
+                offset,
+                TypeFilterScanPageSize,
+                allowedExtensions,
+                token);
+
+            if (pageResult.RawCount == 0)
+            {
+                exhausted = true;
+                break;
+            }
+
+            scannedPages++;
+            foreach (var candidate in pageResult.Items)
+            {
+                result.Add(candidate);
+                if (result.Count >= DisplayResultLimit)
+                {
+                    var cappedStatus = $"{caption}结果：至少 {DisplayResultLimit} 条（类型过滤，已分段扫描 {scannedPages} 页）";
+                    return (result, cappedStatus);
+                }
+            }
+
+            if (pageResult.RawCount < TypeFilterScanPageSize)
+            {
+                exhausted = true;
+                break;
+            }
+
+            offset += pageResult.RawCount;
+        }
+
+        if (token.IsCancellationRequested)
+        {
+            return null;
+        }
+
+        var status = exhausted
+            ? $"{caption}结果：{result.Count} 条（类型过滤，已全量分段扫描 {scannedPages} 页）"
+            : $"{caption}结果：{result.Count} 条（类型过滤）";
+        return (result, status);
+    }
+
+    private Task<(IReadOnlyList<FileCandidate> Items, int RawCount)> QueryEverythingTypeFilteredPageByModeAsync(
+        OverlayMode mode,
+        string keyword,
+        EverythingSortOption sort,
+        int offset,
+        int pageSize,
+        IReadOnlySet<string> allowedExtensions,
+        CancellationToken token)
+    {
+        return mode switch
+        {
+            OverlayMode.Search when !_isFolderDialog => _everythingService.SearchFilesFilteredPageAsync(keyword, sort, offset, pageSize, allowedExtensions, token),
+            OverlayMode.Recent when !_isFolderDialog => _everythingService.RecentFilesFilteredPageAsync(sort, offset, pageSize, allowedExtensions, token),
+            _ => Task.FromResult((Items: (IReadOnlyList<FileCandidate>)[], RawCount: 0)),
+        };
+    }
+
+    private async Task<(IReadOnlyList<FileCandidate> Items, string? StatusMessage, bool CanApplyTypeFilter, string Caption)?> QueryCandidatesByModeAsync(
+        OverlayMode mode,
+        string keyword,
+        EverythingSortOption sort,
+        int resultLimit,
+        CancellationToken token)
+    {
         IReadOnlyList<FileCandidate> items = [];
-        var statusMessage = string.Empty;
-        var canApplyDialogTypeFilter = true;
+        string? statusMessage = string.Empty;
+        var canApplyTypeFilter = true;
+        var caption = "结果";
 
         try
         {
@@ -201,35 +387,39 @@ public partial class OverlayWindow : Window
             {
                 case OverlayMode.Search:
                     items = _isFolderDialog
-                        ? await _everythingService.SearchFoldersAsync(keyword, sort, QueryResultLimit, token)
-                        : await _everythingService.SearchFilesAsync(keyword, sort, QueryResultLimit, token);
+                        ? await _everythingService.SearchFoldersAsync(keyword, sort, resultLimit, token)
+                        : await _everythingService.SearchFilesAsync(keyword, sort, resultLimit, token);
+
+                    caption = _isFolderDialog ? "文件夹搜索" : "搜索";
                     if (!_everythingService.IsAvailable)
                     {
                         statusMessage = $"Everything 不可用：{_everythingService.LastErrorMessage}";
-                        canApplyDialogTypeFilter = false;
+                        canApplyTypeFilter = false;
                     }
                     else
                     {
                         statusMessage = items.Count == 0
                             ? (_isFolderDialog ? "没有文件夹搜索结果。" : "没有搜索结果。")
-                            : $"{(_isFolderDialog ? "文件夹搜索" : "搜索")}结果：{items.Count} 条。";
+                            : $"{caption}结果：{items.Count} 条。";
                     }
 
                     break;
                 case OverlayMode.Recent:
                     items = _isFolderDialog
-                        ? await _everythingService.RecentFoldersAsync(sort, QueryResultLimit, token)
-                        : await _everythingService.RecentFilesAsync(sort, QueryResultLimit, token);
+                        ? await _everythingService.RecentFoldersAsync(sort, resultLimit, token)
+                        : await _everythingService.RecentFilesAsync(sort, resultLimit, token);
+
+                    caption = _isFolderDialog ? "最近文件夹" : "最近文件";
                     if (!_everythingService.IsAvailable)
                     {
                         statusMessage = $"Everything 不可用：{_everythingService.LastErrorMessage}";
-                        canApplyDialogTypeFilter = false;
+                        canApplyTypeFilter = false;
                     }
                     else
                     {
                         statusMessage = items.Count == 0
                             ? (_isFolderDialog ? "没有最近文件夹结果。" : "没有最近文件结果。")
-                            : $"{(_isFolderDialog ? "最近文件夹" : "最近文件")}：{items.Count} 条。";
+                            : $"{caption}：{items.Count} 条。";
                     }
 
                     break;
@@ -240,48 +430,46 @@ public partial class OverlayWindow : Window
                         items = items.Where(candidate => candidate.IsDirectory).ToList();
                     }
 
-                    statusMessage = items.Count == 0 ? null : $"{(_isFolderDialog ? "托盘文件夹" : "托盘文件")}：{items.Count} 条。";
+                    caption = _isFolderDialog ? "托盘文件夹" : "托盘文件";
+                    statusMessage = items.Count == 0 ? null : $"{caption}：{items.Count} 条。";
                     break;
                 case OverlayMode.Explorer:
                     items = _explorerWindowService.GetOpenLocations(string.Empty);
+                    caption = "资源管理器路径";
                     statusMessage = items.Count == 0
                         ? "未检测到可用资源管理器路径。"
-                        : $"资源管理器路径：{items.Count} 条。";
-                    canApplyDialogTypeFilter = false;
+                        : $"{caption}：{items.Count} 条。";
+                    canApplyTypeFilter = false;
                     break;
             }
         }
         catch (OperationCanceledException)
         {
-            return;
+            return null;
         }
 
-        if (token.IsCancellationRequested)
-        {
-            return;
-        }
+        return (items, statusMessage, canApplyTypeFilter, caption);
+    }
 
+    private (IReadOnlyList<FileCandidate> Items, string? StatusMessage) ApplyTypeFilter(
+        IReadOnlyList<FileCandidate> items,
+        string? statusMessage,
+        bool canApplyDialogTypeFilter,
+        string caption)
+    {
         if (_isFolderDialog)
         {
             canApplyDialogTypeFilter = false;
         }
 
-        if (IsTypeFilterActive && canApplyDialogTypeFilter)
+        if (IsTypeFilterActive && canApplyDialogTypeFilter && _dialogController is not null)
         {
-            var allowedExtensions = _dialogController.GetAllowedFileExtensions();
+            var allowedExtensions = _dialogController.GetAllowedFileExtensions(_lastFileTypeFilterText);
             if (allowedExtensions.Count > 0)
             {
                 items = items
                     .Where(candidate => candidate.IsDirectory || HasAllowedExtension(candidate.FullPath, allowedExtensions))
                     .ToList();
-
-                var caption = _currentMode switch
-                {
-                    OverlayMode.Search => "搜索",
-                    OverlayMode.Recent => "最近",
-                    OverlayMode.Tray => "托盘",
-                    _ => "结果",
-                };
                 statusMessage = $"{caption}结果：{items.Count} 条（类型过滤）";
             }
             else if (!string.IsNullOrWhiteSpace(statusMessage))
@@ -294,9 +482,88 @@ public partial class OverlayWindow : Window
             statusMessage = $"{statusMessage}（文件夹选择模式）";
         }
 
-        SetStatus(string.IsNullOrWhiteSpace(statusMessage) ? null : statusMessage);
+        return (items, statusMessage);
+    }
 
-        UpdateItems(items);
+    private static (IReadOnlyList<FileCandidate> Items, bool Trimmed) CapDisplayItems(IReadOnlyList<FileCandidate> items)
+    {
+        if (items.Count <= DisplayResultLimit)
+        {
+            return (items, false);
+        }
+
+        return (items.Take(DisplayResultLimit).ToList(), true);
+    }
+
+    private static string? BuildStatus(string? statusMessage, bool trimmed, bool expandedScan)
+    {
+        if (!trimmed && !expandedScan)
+        {
+            return string.IsNullOrWhiteSpace(statusMessage) ? null : statusMessage;
+        }
+
+        var baseText = string.IsNullOrWhiteSpace(statusMessage) ? "查询结果" : statusMessage!;
+        if (trimmed && expandedScan)
+        {
+            return $"{baseText}（显示前 {DisplayResultLimit} 条，已扩展扫描）";
+        }
+
+        if (trimmed)
+        {
+            return $"{baseText}（显示前 {DisplayResultLimit} 条）";
+        }
+
+        return $"{baseText}（已扩展扫描）";
+    }
+
+    private CancellationToken ReplaceRefreshToken()
+    {
+        var next = new CancellationTokenSource();
+        var previous = Interlocked.Exchange(ref _refreshCts, next);
+        if (previous is not null)
+        {
+            previous.Cancel();
+            previous.Dispose();
+        }
+
+        return next.Token;
+    }
+
+    private void CancelAndDisposeRefreshCts()
+    {
+        var previous = Interlocked.Exchange(ref _refreshCts, null);
+        if (previous is null)
+        {
+            return;
+        }
+
+        previous.Cancel();
+        previous.Dispose();
+    }
+
+    private CancellationToken ReplaceSingleSelectToken()
+    {
+        var next = new CancellationTokenSource();
+        var previous = Interlocked.Exchange(ref _singleSelectCts, next);
+        if (previous is not null)
+        {
+            previous.Cancel();
+            previous.Dispose();
+        }
+
+        return next.Token;
+    }
+
+    private void CancelAndDisposeSingleSelectCts()
+    {
+        var previous = Interlocked.Exchange(ref _singleSelectCts, null);
+        if (previous is null)
+        {
+            return;
+        }
+
+        previous.Cancel();
+        previous.Dispose();
     }
 
     private void UpdateItems(IReadOnlyList<FileCandidate> items)
@@ -308,10 +575,23 @@ public partial class OverlayWindow : Window
         if (changed)
         {
             _suppressSingleSelect = true;
-            _items.Clear();
-            foreach (var item in items)
+
+            var commonPrefixLength = 0;
+            var minCount = Math.Min(_items.Count, items.Count);
+            while (commonPrefixLength < minCount &&
+                   CandidateEquivalent(_items[commonPrefixLength], items[commonPrefixLength]))
             {
-                _items.Add(item);
+                commonPrefixLength++;
+            }
+
+            for (var i = _items.Count - 1; i >= commonPrefixLength; i--)
+            {
+                _items.RemoveAt(i);
+            }
+
+            for (var i = commonPrefixLength; i < items.Count; i++)
+            {
+                _items.Add(items[i]);
             }
 
             ResultList.SelectedItem = null;
@@ -437,6 +717,11 @@ public partial class OverlayWindow : Window
 
     private async void DialogMonitorTimer_OnTick(object? sender, EventArgs e)
     {
+        if (Interlocked.CompareExchange(ref _dialogMonitorInFlight, 1, 0) != 0)
+        {
+            return;
+        }
+
         try
         {
             if (_dialogController is null || _dialogHwnd == IntPtr.Zero)
@@ -445,6 +730,12 @@ public partial class OverlayWindow : Window
             }
 
             if (!NativeMethods.IsWindow(_dialogHwnd))
+            {
+                DetachDialog();
+                return;
+            }
+
+            if (!NativeMethods.IsWindowVisible(_dialogHwnd))
             {
                 DetachDialog();
                 return;
@@ -464,7 +755,15 @@ public partial class OverlayWindow : Window
                 return _lastFileTypeFilterText;
             });
 
-            await Task.WhenAll(folderModeTask, filterTextTask);
+            var monitorTask = Task.WhenAll(folderModeTask, filterTextTask);
+            try
+            {
+                await monitorTask.WaitAsync(TimeSpan.FromMilliseconds(320));
+            }
+            catch (TimeoutException)
+            {
+                return;
+            }
 
             if (_dialogController != controller) return;
 
@@ -501,6 +800,10 @@ public partial class OverlayWindow : Window
                 throttle: TimeSpan.FromSeconds(3));
             DetachDialog();
         }
+        finally
+        {
+            Interlocked.Exchange(ref _dialogMonitorInFlight, 0);
+        }
     }
 
     private void SearchBox_OnTextChanged(object sender, TextChangedEventArgs e)
@@ -527,7 +830,7 @@ public partial class OverlayWindow : Window
             return;
         }
 
-        ExecuteConfirm(candidate);
+        _ = ExecuteConfirmAsync(candidate);
         e.Handled = true;
     }
 
@@ -543,14 +846,14 @@ public partial class OverlayWindow : Window
             return;
         }
 
-        ExecuteSingle(candidate);
+        _ = ExecuteSingleAsync(candidate);
     }
 
     private void ResultList_OnMouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
         if (ResultList.SelectedItem is FileCandidate candidate)
         {
-            ExecuteConfirm(candidate);
+            _ = ExecuteConfirmAsync(candidate);
         }
     }
 
@@ -585,42 +888,151 @@ public partial class OverlayWindow : Window
             return;
         }
 
-        ExecuteConfirm(candidate);
+        _ = ExecuteConfirmAsync(candidate);
         e.Handled = true;
     }
 
-    private void ExecuteSingle(FileCandidate candidate)
+    private async Task ExecuteSingleAsync(FileCandidate candidate)
     {
         if (_dialogController is null)
         {
             return;
         }
 
-        var ok = _dialogController.TryPrimeSelection(candidate);
+        var token = ReplaceSingleSelectToken();
+        var operationVersion = Interlocked.Increment(ref _singleSelectVersion);
+        var controller = _dialogController;
+        var gateAcquired = false;
+        try
+        {
+            await _automationOperationGate.WaitAsync(token);
+            gateAcquired = true;
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        bool ok;
+        try
+        {
+            var automationTask = Task.Run(
+                () => controller.TryPrimeSelectionAsync(candidate, token).GetAwaiter().GetResult(),
+                token);
+
+            ok = await WaitForAutomationResultAsync(
+                automationTask,
+                "OverlayWindow.ExecuteSingleAsync.TryPrimeSelection",
+                token);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        finally
+        {
+            if (gateAcquired)
+            {
+                _automationOperationGate.Release();
+            }
+        }
+
+        if (token.IsCancellationRequested)
+        {
+            return;
+        }
+
+        if (operationVersion != Interlocked.Read(ref _singleSelectVersion) || _dialogController != controller)
+        {
+            return;
+        }
+
         if (!ok)
         {
-            SetStatus("单击定位失败，目标对话框控件不可用。");
+            SetStatus("单击定位失败或超时，目标对话框可能繁忙。");
             return;
         }
 
         SetStatus($"已定位：{candidate.DisplayName}");
     }
 
-    private void ExecuteConfirm(FileCandidate candidate)
+    private async Task ExecuteConfirmAsync(FileCandidate candidate)
     {
         if (_dialogController is null)
         {
             return;
         }
 
-        var ok = _dialogController.TryConfirmSelection(candidate);
+        Interlocked.Increment(ref _singleSelectVersion);
+        CancelAndDisposeSingleSelectCts();
+
+        var controller = _dialogController;
+        await _automationOperationGate.WaitAsync();
+        bool ok;
+        try
+        {
+            var automationTask = Task.Run(
+                () => controller.TryConfirmSelection(candidate));
+
+            ok = await WaitForAutomationResultAsync(
+                automationTask,
+                "OverlayWindow.ExecuteConfirmAsync.TryConfirmSelection",
+                CancellationToken.None);
+        }
+        finally
+        {
+            _automationOperationGate.Release();
+        }
+
+        if (_dialogController != controller)
+        {
+            return;
+        }
+
         if (!ok)
         {
-            SetStatus("确认失败，目标对话框控件不可用。");
+            SetStatus("确认失败或超时，目标对话框可能繁忙。");
             return;
         }
 
         SetStatus($"已提交：{candidate.DisplayName}");
+    }
+
+    private static async Task<bool> WaitForAutomationResultAsync(
+        Task<bool> task,
+        string context,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await task.WaitAsync(TimeSpan.FromMilliseconds(AutomationActionTimeoutMs), cancellationToken);
+        }
+        catch (TimeoutException)
+        {
+            _ = task.ContinueWith(
+                t =>
+                {
+                    if (t.Exception is not null)
+                    {
+                        AppLogger.LogException($"{context}.LateFault", t.Exception);
+                    }
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted,
+                TaskScheduler.Default);
+
+            AppLogger.LogWarning($"{context} timeout after {AutomationActionTimeoutMs}ms.");
+            return false;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogException(context, ex, throttle: TimeSpan.FromSeconds(2));
+            return false;
+        }
     }
 
     private void SearchModeButton_OnClick(object sender, RoutedEventArgs e)
@@ -857,15 +1269,20 @@ public partial class OverlayWindow : Window
         {
             var left = _items[i];
             var right = items[i];
-            if (!string.Equals(left.FullPath, right.FullPath, StringComparison.OrdinalIgnoreCase) ||
-                left.IsDirectory != right.IsDirectory ||
-                left.Source != right.Source)
+            if (!CandidateEquivalent(left, right))
             {
                 return false;
             }
         }
 
         return true;
+    }
+
+    private static bool CandidateEquivalent(FileCandidate left, FileCandidate right)
+    {
+        return string.Equals(left.FullPath, right.FullPath, StringComparison.OrdinalIgnoreCase) &&
+               left.IsDirectory == right.IsDirectory &&
+               left.Source == right.Source;
     }
 
     private static T? FindDescendant<T>(DependencyObject root) where T : DependencyObject
