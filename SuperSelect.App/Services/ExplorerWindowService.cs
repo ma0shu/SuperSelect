@@ -47,25 +47,30 @@ internal sealed class ExplorerWindowService
                 return result;
             }
 
-            dynamic shell = shellObject;
-            windowsObject = shell.Windows();
-            dynamic windows = windowsObject;
+            windowsObject = shellType.InvokeMember("Windows", System.Reflection.BindingFlags.InvokeMethod, null, shellObject, null);
+            if (windowsObject is null) return result;
 
-            var count = (int)windows.Count;
+            var windowsType = windowsObject.GetType();
+            var count = (int)windowsType.InvokeMember("Count", System.Reflection.BindingFlags.GetProperty, null, windowsObject, null)!;
+
             for (var i = 0; i < count; i++)
             {
-                dynamic window = windows.Item(i);
-
+                object? window = null;
                 try
                 {
-                    var processPath = Convert.ToString(window.FullName);
+                    window = windowsType.InvokeMember("Item", System.Reflection.BindingFlags.InvokeMethod, null, windowsObject, new object[] { i });
+                    if (window is null) continue;
+
+                    var windowType = window.GetType();
+                    var processPath = Convert.ToString(windowType.InvokeMember("FullName", System.Reflection.BindingFlags.GetProperty, null, window, null));
+
                     if (string.IsNullOrWhiteSpace(processPath) ||
                         !processPath.EndsWith("explorer.exe", StringComparison.OrdinalIgnoreCase))
                     {
                         continue;
                     }
 
-                    var folderPath = ResolveExplorerPathFromShell(window);
+                    var folderPath = ResolveExplorerPathFromShell(window, windowType);
                     if (string.IsNullOrWhiteSpace(folderPath))
                     {
                         continue;
@@ -76,7 +81,7 @@ internal sealed class ExplorerWindowService
                         continue;
                     }
 
-                    var title = Convert.ToString(window.LocationName);
+                    var title = Convert.ToString(windowType.InvokeMember("LocationName", System.Reflection.BindingFlags.GetProperty, null, window, null));
                     result.Add(CreateCandidate(folderPath, title));
                 }
                 catch
@@ -161,13 +166,25 @@ internal sealed class ExplorerWindowService
         };
     }
 
-    private static string? ResolveExplorerPathFromShell(dynamic window)
+    private static string? ResolveExplorerPathFromShell(object window, Type windowType)
     {
         string? folderPath = null;
 
         try
         {
-            folderPath = Convert.ToString(window.Document?.Folder?.Self?.Path);
+            var document = windowType.InvokeMember("Document", System.Reflection.BindingFlags.GetProperty, null, window, null);
+            if (document != null)
+            {
+                var folder = document.GetType().InvokeMember("Folder", System.Reflection.BindingFlags.GetProperty, null, document, null);
+                if (folder != null)
+                {
+                    var self = folder.GetType().InvokeMember("Self", System.Reflection.BindingFlags.GetProperty, null, folder, null);
+                    if (self != null)
+                    {
+                        folderPath = Convert.ToString(self.GetType().InvokeMember("Path", System.Reflection.BindingFlags.GetProperty, null, self, null));
+                    }
+                }
+            }
         }
         catch
         {
@@ -181,7 +198,7 @@ internal sealed class ExplorerWindowService
 
         try
         {
-            var locationUrl = Convert.ToString(window.LocationURL);
+            var locationUrl = Convert.ToString(windowType.InvokeMember("LocationURL", System.Reflection.BindingFlags.GetProperty, null, window, null));
             folderPath = TryParseFileUrl(locationUrl);
         }
         catch

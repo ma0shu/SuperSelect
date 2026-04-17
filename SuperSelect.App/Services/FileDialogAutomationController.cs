@@ -267,15 +267,28 @@ internal sealed class FileDialogAutomationController
     {
         try
         {
-            var byId = root.FindFirst(
-                TreeScope.Descendants,
-                new AndCondition(
-                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit),
-                    new PropertyCondition(AutomationElement.AutomationIdProperty, "1148")));
-
-            if (byId is not null)
+            var hwnd = new IntPtr(root.Current.NativeWindowHandle);
+            if (hwnd != IntPtr.Zero)
             {
-                return byId;
+                var hComboBoxEx32 = NativeMethods.FindWindowEx(hwnd, IntPtr.Zero, "ComboBoxEx32", null);
+                if (hComboBoxEx32 != IntPtr.Zero)
+                {
+                    var hComboBox = NativeMethods.FindWindowEx(hComboBoxEx32, IntPtr.Zero, "ComboBox", null);
+                    if (hComboBox != IntPtr.Zero)
+                    {
+                        var hEdit = NativeMethods.FindWindowEx(hComboBox, IntPtr.Zero, "Edit", null);
+                        if (hEdit != IntPtr.Zero)
+                        {
+                            return AutomationElement.FromHandle(hEdit);
+                        }
+                    }
+                }
+
+                var hEditId = NativeMethods.GetDlgItem(hwnd, 1148);
+                if (hEditId != IntPtr.Zero)
+                {
+                    return AutomationElement.FromHandle(hEditId);
+                }
             }
 
             var edits = root.FindAll(
@@ -313,15 +326,14 @@ internal sealed class FileDialogAutomationController
     {
         try
         {
-            var byId = root.FindFirst(
-                TreeScope.Descendants,
-                new AndCondition(
-                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
-                    new PropertyCondition(AutomationElement.AutomationIdProperty, "1")));
-
-            if (byId is not null)
+            var hwnd = new IntPtr(root.Current.NativeWindowHandle);
+            if (hwnd != IntPtr.Zero)
             {
-                return byId;
+                var btn1 = NativeMethods.GetDlgItem(hwnd, 1);
+                if (btn1 != IntPtr.Zero)
+                {
+                    return AutomationElement.FromHandle(btn1);
+                }
             }
 
             var buttons = root.FindAll(

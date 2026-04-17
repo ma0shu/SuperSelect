@@ -118,6 +118,7 @@ internal sealed class EverythingService
 
                 var count = (int)Native.Everything_GetNumResults();
                 var result = new List<FileCandidate>(Math.Min(count, maxResults));
+                var builder = new StringBuilder(4096);
 
                 for (var i = 0; i < count; i++)
                 {
@@ -126,7 +127,7 @@ internal sealed class EverythingService
                         return [];
                     }
 
-                    var builder = new StringBuilder(4096);
+                    builder.Clear();
                     Native.Everything_GetResultFullPathNameW((uint)i, builder, (uint)builder.Capacity);
 
                     var fullPath = builder.ToString();
