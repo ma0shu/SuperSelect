@@ -145,8 +145,10 @@
             CornerRadius="14"
             BorderThickness="1"
             BorderBrush="#BFD1E6"
-            Padding="12,10"
-            AllowDrop="True">
+            Padding="12,10,12,4"
+            AllowDrop="True"
+            PreviewDragOver="Window_OnPreviewDragOver"
+            PreviewDrop="Window_OnPreviewDrop">
         <Border.Background>
             <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
                 <GradientStop Color="#FBFDFF" Offset="0" />
@@ -162,6 +164,7 @@
 
         <Grid>
             <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
@@ -242,78 +245,88 @@
                     Margin="0,8,0,0"
                     Height="236"
                     MinHeight="96"
-                    CornerRadius="10"
+                    CornerRadius="8"
                     BorderBrush="#C9D7E8"
-                    BorderThickness="1"
+                    BorderThickness="0.7"
                     Background="#FFFFFF"
                     Visibility="Collapsed">
-                <ListBox x:Name="ResultList"
-                         Margin="2"
-                         BorderThickness="0"
-                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                         ScrollViewer.VerticalScrollBarVisibility="Auto"
-                         ScrollViewer.CanContentScroll="True"
-                         VirtualizingPanel.IsVirtualizing="True"
-                         VirtualizingPanel.VirtualizationMode="Recycling"
-                         PreviewMouseWheel="ResultList_OnPreviewMouseWheel"
-                         MouseDoubleClick="ResultList_OnMouseDoubleClick"
-                         KeyDown="ResultList_OnKeyDown"
-                         ContextMenuOpening="ResultList_OnContextMenuOpening">
-                    <ListBox.Resources>
-                        <Style TargetType="{x:Type ScrollBar}" BasedOn="{StaticResource SlimScrollBarStyle}" />
-                        <ContextMenu x:Key="TrayContextMenu" DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
-                            <MenuItem Header="置顶" Click="TrayMenuItem_Pin_OnClick" />
-                            <MenuItem Header="删除" Click="TrayMenuItem_Delete_OnClick" />
-                        </ContextMenu>
-                    </ListBox.Resources>
-                    <ListBox.ItemContainerStyle>
-                        <Style TargetType="ListBoxItem">
-                            <Setter Property="ContextMenu" Value="{StaticResource TrayContextMenu}" />
-                            <Setter Property="Background" Value="Transparent" />
-                            <Setter Property="BorderBrush" Value="Transparent" />
-                            <Setter Property="BorderThickness" Value="1" />
-                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                            <Setter Property="Padding" Value="4"/>
-                            <EventSetter Event="PreviewMouseRightButtonDown" Handler="ListBoxItem_PreviewMouseRightButtonDown" />
-                            <EventSetter Event="PreviewMouseLeftButtonUp" Handler="ListBoxItem_PreviewMouseLeftButtonUp" />
-                            <Style.Triggers>
-                                <Trigger Property="IsMouseOver" Value="True">
-                                    <Setter Property="Background" Value="#EFF6FF" />
-                                    <Setter Property="BorderBrush" Value="#BFDBFE" />
-                                </Trigger>
-                                <Trigger Property="IsSelected" Value="True">
-                                    <Setter Property="Background" Value="#DBEAFE" />
-                                    <Setter Property="BorderBrush" Value="#93C5FD" />
-                                </Trigger>
-                            </Style.Triggers>
-                        </Style>
-                    </ListBox.ItemContainerStyle>
-                    <ListBox.ItemTemplate>
-                        <DataTemplate>
-                            <StackPanel Margin="4">
-                                <DockPanel>
-                                    <Border DockPanel.Dock="Right"
-                                            CornerRadius="4"
-                                            Background="#E2E8F0"
-                                            Padding="6,1"
-                                            Margin="8,0,0,0">
-                                        <TextBlock Text="{Binding SourceLabel}"
-                                                   FontSize="11"
-                                                   Foreground="#334155" />
-                                    </Border>
-                                    <TextBlock Text="{Binding DisplayName}"
-                                               FontWeight="SemiBold"
+                <Grid>
+                    <ListBox x:Name="ResultList"
+                             Margin="2"
+                             BorderThickness="0"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto"
+                             ScrollViewer.CanContentScroll="True"
+                             VirtualizingPanel.IsVirtualizing="True"
+                             VirtualizingPanel.VirtualizationMode="Recycling"
+                             PreviewMouseWheel="ResultList_OnPreviewMouseWheel"
+                             MouseDoubleClick="ResultList_OnMouseDoubleClick"
+                             KeyDown="ResultList_OnKeyDown"
+                             ContextMenuOpening="ResultList_OnContextMenuOpening">
+                        <ListBox.Resources>
+                            <Style TargetType="{x:Type ScrollBar}" BasedOn="{StaticResource SlimScrollBarStyle}" />
+                            <ContextMenu x:Key="TrayContextMenu" DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                                <MenuItem Header="置顶" Click="TrayMenuItem_Pin_OnClick" />
+                                <MenuItem Header="删除" Click="TrayMenuItem_Delete_OnClick" />
+                            </ContextMenu>
+                        </ListBox.Resources>
+                        <ListBox.ItemContainerStyle>
+                            <Style TargetType="ListBoxItem">
+                                <Setter Property="ContextMenu" Value="{StaticResource TrayContextMenu}" />
+                                <Setter Property="Background" Value="Transparent" />
+                                <Setter Property="BorderBrush" Value="Transparent" />
+                                <Setter Property="BorderThickness" Value="1" />
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                <Setter Property="Padding" Value="4"/>
+                                <EventSetter Event="PreviewMouseRightButtonDown" Handler="ListBoxItem_PreviewMouseRightButtonDown" />
+                                <EventSetter Event="PreviewMouseLeftButtonUp" Handler="ListBoxItem_PreviewMouseLeftButtonUp" />
+                                <Style.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter Property="Background" Value="#EFF6FF" />
+                                        <Setter Property="BorderBrush" Value="#BFDBFE" />
+                                    </Trigger>
+                                    <Trigger Property="IsSelected" Value="True">
+                                        <Setter Property="Background" Value="#DBEAFE" />
+                                        <Setter Property="BorderBrush" Value="#93C5FD" />
+                                    </Trigger>
+                                </Style.Triggers>
+                            </Style>
+                        </ListBox.ItemContainerStyle>
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Margin="4">
+                                    <DockPanel>
+                                        <Border DockPanel.Dock="Right"
+                                                CornerRadius="4"
+                                                Background="#E2E8F0"
+                                                Padding="6,1"
+                                                Margin="8,0,0,0">
+                                            <TextBlock Text="{Binding SourceLabel}"
+                                                       FontSize="11"
+                                                       Foreground="#334155" />
+                                        </Border>
+                                        <TextBlock Text="{Binding DisplayName}"
+                                                   FontWeight="SemiBold"
+                                                   TextTrimming="CharacterEllipsis" />
+                                    </DockPanel>
+                                    <TextBlock Text="{Binding SecondaryText}"
+                                               FontSize="12"
+                                               Foreground="#64748B"
                                                TextTrimming="CharacterEllipsis" />
-                                </DockPanel>
-                                <TextBlock Text="{Binding SecondaryText}"
-                                           FontSize="12"
-                                           Foreground="#64748B"
-                                           TextTrimming="CharacterEllipsis" />
-                            </StackPanel>
-                        </DataTemplate>
-                    </ListBox.ItemTemplate>
-                </ListBox>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </Grid>
             </Border>
+
+            <TextBlock x:Name="ResultSummaryText"
+                       Grid.Row="3"
+                       Margin="2,1,4,0"
+                       FontSize="12"
+                       Foreground="#64748B"
+                       HorizontalAlignment="Right"
+                       Visibility="Collapsed" />
         </Grid>
     </Border>
 </Window>

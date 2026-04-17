@@ -3,6 +3,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Automation;
+using System.Windows.Interop;
 using System.Windows.Threading;
 using SuperSelect.App.Services;
 using SuperSelect.App.Views;
@@ -14,6 +15,7 @@ public partial class App : System.Windows.Application
     private WinEventFileDialogWatcher? _dialogWatcher;
     private OverlayWindow? _overlayWindow;
     private AppTrayIcon? _trayIcon;
+    private HwndSource? _hotkeySource;
     private bool _isExitRequested;
 
     private EverythingService? _everythingService;
@@ -23,6 +25,10 @@ public partial class App : System.Windows.Application
     private DateTime _lastMemoryTrimUtc = DateTime.MinValue;
     private static readonly TimeSpan MemoryTrimCooldown = TimeSpan.FromMinutes(2);
     private const long MemoryTrimManagedThresholdBytes = 64L * 1024 * 1024;
+    private const int MainWindowHotkeyId = 0x5353;
+    private const uint MainWindowHotkeyModifiers = Native.NativeMethods.MOD_CONTROL | Native.NativeMethods.MOD_SHIFT;
+    private const uint MainWindowHotkeyVKey = (uint)'Z';
+    private const string MainWindowHotkeyDisplayName = "Ctrl+Shift+Z";
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -49,6 +55,8 @@ public partial class App : System.Windows.Application
         _trayIcon = new AppTrayIcon(LoadAppIcon());
         _trayIcon.OpenRequested += OnTrayOpenRequested;
         _trayIcon.ExitRequested += OnTrayExitRequested;
+
+        InitializeGlobalHotkey();
     }
 
     protected override void OnExit(ExitEventArgs e)
@@ -65,6 +73,8 @@ public partial class App : System.Windows.Application
             _trayIcon.Dispose();
             _trayIcon = null;
         }
+
+        DisposeGlobalHotkey();
 
         if (_dialogWatcher is not null)
         {
@@ -191,6 +201,8 @@ public partial class App : System.Windows.Application
     {
         _isExitRequested = true;
 
+        DisposeGlobalHotkey();
+
         if (_dialogWatcher is not null)
         {
             _dialogWatcher.ActiveDialogChanged -= OnActiveDialogChanged;
@@ -213,6 +225,83 @@ public partial class App : System.Windows.Application
         }
 
         Shutdown();
+    }
+
+    private void InitializeGlobalHotkey()
+    {
+        if (_hotkeySource is not null)
+        {
+            return;
+        }
+
+        var parameters = new HwndSourceParameters("SuperSelect.HotkeySink")
+        {
+            Width = 0,
+            Height = 0,
+            WindowStyle = unchecked((int)0x80000000), // WS_POPUP
+        };
+
+        _hotkeySource = new HwndSource(parameters);
+        _hotkeySource.AddHook(HotkeyWndProc);
+
+        if (!Native.NativeMethods.RegisterHotKey(
+                _hotkeySource.Handle,
+                MainWindowHotkeyId,
+                MainWindowHotkeyModifiers,
+                MainWindowHotkeyVKey))
+        {
+            var error = Marshal.GetLastWin32Error();
+            AppLogger.LogWarning($"RegisterHotKey failed. hotkey={MainWindowHotkeyDisplayName}; win32={error}");
+            return;
+        }
+
+        AppLogger.LogInfo($"Global hotkey registered: {MainWindowHotkeyDisplayName}");
+    }
+
+    private void DisposeGlobalHotkey()
+    {
+        if (_hotkeySource is null)
+        {
+            return;
+        }
+
+        try
+        {
+            if (_hotkeySource.Handle != IntPtr.Zero &&
+                !Native.NativeMethods.UnregisterHotKey(_hotkeySource.Handle, MainWindowHotkeyId))
+            {
+                var error = Marshal.GetLastWin32Error();
+                if (error != 0)
+                {
+                    AppLogger.LogWarning($"UnregisterHotKey failed. hotkey={MainWindowHotkeyDisplayName}; win32={error}");
+                }
+            }
+
+            _hotkeySource.RemoveHook(HotkeyWndProc);
+            _hotkeySource.Dispose();
+            _hotkeySource = null;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogException("App.DisposeGlobalHotkey", ex, throttle: TimeSpan.FromSeconds(3));
+        }
+    }
+
+    private IntPtr HotkeyWndProc(
+        IntPtr hwnd,
+        int msg,
+        IntPtr wParam,
+        IntPtr lParam,
+        ref bool handled)
+    {
+        if (msg != Native.NativeMethods.WM_HOTKEY || wParam.ToInt32() != MainWindowHotkeyId)
+        {
+            return IntPtr.Zero;
+        }
+
+        _ = Dispatcher.BeginInvoke(new Action(ShowMainWindow));
+        handled = true;
+        return IntPtr.Zero;
     }
 
     private void RequestMemoryTrim(string reason)

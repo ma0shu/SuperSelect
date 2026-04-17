@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -18,10 +19,11 @@ public partial class OverlayWindow : Window
     private sealed record OptionItem<T>(string Label, T Value);
 
     private const double UltraCompactHeightDip = 66.0;
-    private const double CompactHeightDip = 108.0;
+    private const double CompactHeightDip = 96.0;
     private const double ExpandedHeightDip = 350.0;
     private const double MinUsableHeightDip = 66.0;
-    private const double HeaderAndStatusHeightDip = 112.0;
+    private const double HeaderAndStatusHeightDip = 96.0;
+    private const double ResultSummaryHeightDip = 14.0;
     private const int OverlayGapPx = 0;
     private const int InitialQueryResultLimit = 320;
     private const int ExpandedQueryResultLimit = 1200;
@@ -57,6 +59,7 @@ public partial class OverlayWindow : Window
     private int _dialogMonitorInFlight;
     private long _singleSelectVersion;
     private bool _allowClose;
+    private bool _dropInteropConfigured;
 
     internal OverlayWindow(
         EverythingService everythingService,
@@ -102,6 +105,8 @@ public partial class OverlayWindow : Window
         _dialogHwnd = dialogHwnd;
         _dialogController = new FileDialogAutomationController(dialogHwnd);
         Interlocked.Increment(ref _singleSelectVersion);
+        _searchDebounceTimer.Stop();
+        ResetModeForDialog();
 
         var controller = _dialogController;
         if (controller is not null)
@@ -128,17 +133,12 @@ public partial class OverlayWindow : Window
         }
 
         ApplyModeUiState();
-
+        var overlayHwnd = new WindowInteropHelper(this).EnsureHandle();
+        ConfigureDropInteropCompatibility(overlayHwnd);
+        NativeMethods.SetWindowLongPtrEx(overlayHwnd, NativeMethods.GWL_HWNDPARENT, _dialogHwnd);
         if (!IsVisible)
         {
-            var overlayHwnd = new WindowInteropHelper(this).EnsureHandle();
-            NativeMethods.SetWindowLongPtrEx(overlayHwnd, NativeMethods.GWL_HWNDPARENT, _dialogHwnd);
             Show();
-        }
-        else
-        {
-            var overlayHwnd = new WindowInteropHelper(this).Handle;
-            NativeMethods.SetWindowLongPtrEx(overlayHwnd, NativeMethods.GWL_HWNDPARENT, _dialogHwnd);
         }
 
         _dialogMonitorTimer.Start();
@@ -164,6 +164,7 @@ public partial class OverlayWindow : Window
         SearchBox.Text = string.Empty;
         ResultHost.Visibility = Visibility.Collapsed;
         SetStatus(null);
+        SetResultSummary(null);
         Height = UltraCompactHeightDip;
 
         if (IsVisible)
@@ -223,6 +224,7 @@ public partial class OverlayWindow : Window
         if (mode == OverlayMode.Search && string.IsNullOrWhiteSpace(keyword))
         {
             SetStatus(null);
+            SetResultSummary(null);
             UpdateItems([]);
             return;
         }
@@ -245,10 +247,11 @@ public partial class OverlayWindow : Window
             return;
         }
 
-        var (initialFilteredItems, initialStatus) = ApplyTypeFilter(initialOutcome.Value.Items, initialOutcome.Value.StatusMessage, initialOutcome.Value.CanApplyTypeFilter, initialOutcome.Value.Caption);
+        var (initialFilteredItems, initialStatus) = ApplyTypeFilter(initialOutcome.Value.Items, initialOutcome.Value.StatusMessage, initialOutcome.Value.CanApplyTypeFilter);
         var (initialDisplayItems, initialTrimmed) = CapDisplayItems(initialFilteredItems);
-        SetStatus(BuildStatus(initialStatus, initialTrimmed, expandedScan: false));
+        SetStatus(BuildStatusForMode(mode, initialStatus, initialTrimmed, expandedScan: false));
         UpdateItems(initialDisplayItems);
+        UpdateSearchResultSummary(mode, initialDisplayItems.Count);
 
         var expandedLimit = IsTypeFilterActive ? ExpandedTypeFilterQueryResultLimit : ExpandedQueryResultLimit;
         var shouldExpand =
@@ -274,14 +277,14 @@ public partial class OverlayWindow : Window
                     mode,
                     keyword,
                     sort,
-                    initialOutcome.Value.Caption,
                     allowedExtensions,
                     token);
 
                 if (pagedOutcome is not null && !token.IsCancellationRequested)
                 {
-                    SetStatus(pagedOutcome.Value.StatusMessage);
+                    SetStatus(BuildStatusForMode(mode, pagedOutcome.Value.StatusMessage, trimmed: false, expandedScan: true));
                     UpdateItems(pagedOutcome.Value.Items);
+                    UpdateSearchResultSummary(mode, pagedOutcome.Value.Items.Count);
                 }
 
                 return;
@@ -294,24 +297,23 @@ public partial class OverlayWindow : Window
             return;
         }
 
-        var (expandedFilteredItems, expandedStatus) = ApplyTypeFilter(expandedOutcome.Value.Items, expandedOutcome.Value.StatusMessage, expandedOutcome.Value.CanApplyTypeFilter, expandedOutcome.Value.Caption);
+        var (expandedFilteredItems, expandedStatus) = ApplyTypeFilter(expandedOutcome.Value.Items, expandedOutcome.Value.StatusMessage, expandedOutcome.Value.CanApplyTypeFilter);
         var (expandedDisplayItems, expandedTrimmed) = CapDisplayItems(expandedFilteredItems);
-        SetStatus(BuildStatus(expandedStatus, expandedTrimmed, expandedScan: true));
+        SetStatus(BuildStatusForMode(mode, expandedStatus, expandedTrimmed, expandedScan: true));
         UpdateItems(expandedDisplayItems);
+        UpdateSearchResultSummary(mode, expandedDisplayItems.Count);
     }
 
-    private async Task<(IReadOnlyList<FileCandidate> Items, string StatusMessage)?> QueryTypeFilteredCandidatesByPagingAsync(
+    private async Task<(IReadOnlyList<FileCandidate> Items, string? StatusMessage)?> QueryTypeFilteredCandidatesByPagingAsync(
         OverlayMode mode,
         string keyword,
         EverythingSortOption sort,
-        string caption,
         IReadOnlySet<string> allowedExtensions,
         CancellationToken token)
     {
         var result = new List<FileCandidate>(DisplayResultLimit);
         var offset = 0;
         var exhausted = false;
-        var scannedPages = 0;
 
         while (!token.IsCancellationRequested)
         {
@@ -330,14 +332,12 @@ public partial class OverlayWindow : Window
                 break;
             }
 
-            scannedPages++;
             foreach (var candidate in pageResult.Items)
             {
                 result.Add(candidate);
                 if (result.Count >= DisplayResultLimit)
                 {
-                    var cappedStatus = $"{caption}结果：至少 {DisplayResultLimit} 条（类型过滤，已分段扫描 {scannedPages} 页）";
-                    return (result, cappedStatus);
+                    return (result, null);
                 }
             }
 
@@ -355,9 +355,9 @@ public partial class OverlayWindow : Window
             return null;
         }
 
-        var status = exhausted
-            ? $"{caption}结果：{result.Count} 条（类型过滤，已全量分段扫描 {scannedPages} 页）"
-            : $"{caption}结果：{result.Count} 条（类型过滤）";
+        var status = result.Count == 0 && exhausted
+            ? "没有符合当前文件类型的结果。"
+            : null;
         return (result, status);
     }
 
@@ -409,7 +409,7 @@ public partial class OverlayWindow : Window
                     {
                         statusMessage = items.Count == 0
                             ? (_isFolderDialog ? "没有文件夹搜索结果。" : "没有搜索结果。")
-                            : $"{caption}结果：{items.Count} 条。";
+                            : null;
                     }
 
                     break;
@@ -428,7 +428,7 @@ public partial class OverlayWindow : Window
                     {
                         statusMessage = items.Count == 0
                             ? (_isFolderDialog ? "没有最近文件夹结果。" : "没有最近文件结果。")
-                            : $"{caption}：{items.Count} 条。";
+                            : null;
                     }
 
                     break;
@@ -440,14 +440,14 @@ public partial class OverlayWindow : Window
                     }
 
                     caption = _isFolderDialog ? "托盘文件夹" : "托盘文件";
-                    statusMessage = items.Count == 0 ? null : $"{caption}：{items.Count} 条。";
+                    statusMessage = null;
                     break;
                 case OverlayMode.Explorer:
                     items = _explorerWindowService.GetOpenLocations(string.Empty);
                     caption = "资源管理器路径";
                     statusMessage = items.Count == 0
                         ? "未检测到可用资源管理器路径。"
-                        : $"{caption}：{items.Count} 条。";
+                        : null;
                     canApplyTypeFilter = false;
                     break;
             }
@@ -463,8 +463,7 @@ public partial class OverlayWindow : Window
     private (IReadOnlyList<FileCandidate> Items, string? StatusMessage) ApplyTypeFilter(
         IReadOnlyList<FileCandidate> items,
         string? statusMessage,
-        bool canApplyDialogTypeFilter,
-        string caption)
+        bool canApplyDialogTypeFilter)
     {
         if (_isFolderDialog)
         {
@@ -479,11 +478,11 @@ public partial class OverlayWindow : Window
                 items = items
                     .Where(candidate => candidate.IsDirectory || HasAllowedExtension(candidate.FullPath, allowedExtensions))
                     .ToList();
-                statusMessage = $"{caption}结果：{items.Count} 条（类型过滤）";
-            }
-            else if (!string.IsNullOrWhiteSpace(statusMessage))
-            {
-                statusMessage = $"{statusMessage}（当前类型=全部）";
+
+                if (items.Count == 0 && string.IsNullOrWhiteSpace(statusMessage))
+                {
+                    statusMessage = "没有符合当前文件类型的结果。";
+                }
             }
         }
         else if (_isFolderDialog && !string.IsNullOrWhiteSpace(statusMessage))
@@ -703,7 +702,10 @@ public partial class OverlayWindow : Window
             return;
         }
 
-        var computed = windowHeightDip - HeaderAndStatusHeightDip;
+        var summaryExtra = ResultSummaryText.Visibility == Visibility.Visible
+            ? ResultSummaryHeightDip
+            : 0.0;
+        var computed = windowHeightDip - HeaderAndStatusHeightDip - summaryExtra;
         ResultHost.Height = Math.Max(ResultHost.MinHeight, computed);
     }
 
@@ -719,6 +721,56 @@ public partial class OverlayWindow : Window
             StatusText.Visibility = Visibility.Visible;
             StatusText.Text = message;
         }
+    }
+
+    private void SetResultSummary(string? message)
+    {
+        var previousVisibility = ResultSummaryText.Visibility;
+        var previousText = ResultSummaryText.Text;
+
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            ResultSummaryText.Visibility = Visibility.Collapsed;
+            ResultSummaryText.Text = string.Empty;
+        }
+        else
+        {
+            ResultSummaryText.Visibility = Visibility.Visible;
+            ResultSummaryText.Text = message;
+        }
+
+        if ((previousVisibility != ResultSummaryText.Visibility ||
+             !string.Equals(previousText, ResultSummaryText.Text, StringComparison.Ordinal)) &&
+            ResultHost.Visibility == Visibility.Visible)
+        {
+            PositionToDialog();
+        }
+    }
+
+    private void UpdateSearchResultSummary(OverlayMode mode, int displayCount)
+    {
+        if (mode != OverlayMode.Search || displayCount <= 0)
+        {
+            SetResultSummary(null);
+            return;
+        }
+
+        SetResultSummary($"搜索查询结果 {displayCount} 条");
+    }
+
+    private static string? BuildStatusForMode(OverlayMode mode, string? statusMessage, bool trimmed, bool expandedScan)
+    {
+        if (string.IsNullOrWhiteSpace(statusMessage))
+        {
+            return null;
+        }
+
+        if (mode == OverlayMode.Search)
+        {
+            return statusMessage;
+        }
+
+        return BuildStatus(statusMessage, trimmed, expandedScan);
     }
 
     private EverythingSortOption CurrentSort =>
@@ -816,6 +868,13 @@ public partial class OverlayWindow : Window
 
     private void SearchBox_OnTextChanged(object sender, TextChangedEventArgs e)
     {
+        if (_currentMode == OverlayMode.Explorer &&
+            !string.IsNullOrWhiteSpace(SearchBox.Text))
+        {
+            _currentMode = OverlayMode.Search;
+            ApplyModeUiState();
+        }
+
         if (_currentMode != OverlayMode.Search)
         {
             return;
@@ -1108,6 +1167,13 @@ public partial class OverlayWindow : Window
         _ = RefreshCandidatesAsync(immediate: true);
     }
 
+    private void ResetModeForDialog()
+    {
+        _currentMode = _explorerWindowService.GetOpenLocations(string.Empty).Count > 0
+            ? OverlayMode.Explorer
+            : OverlayMode.Search;
+    }
+
     private void ApplyModeUiState()
     {
         SearchModeButton.IsChecked = _currentMode == OverlayMode.Search;
@@ -1142,6 +1208,34 @@ public partial class OverlayWindow : Window
 
         _searchDebounceTimer.Stop();
         _ = RefreshCandidatesAsync(immediate: true);
+    }
+
+    private void ConfigureDropInteropCompatibility(IntPtr overlayHwnd)
+    {
+        if (_dropInteropConfigured || overlayHwnd == IntPtr.Zero)
+        {
+            return;
+        }
+
+        TryAllowDropMessage(overlayHwnd, NativeMethods.WM_DROPFILES);
+        TryAllowDropMessage(overlayHwnd, NativeMethods.WM_COPYDATA);
+        TryAllowDropMessage(overlayHwnd, NativeMethods.WM_COPYGLOBALDATA);
+        NativeMethods.DragAcceptFiles(overlayHwnd, true);
+        _dropInteropConfigured = true;
+    }
+
+    private static void TryAllowDropMessage(IntPtr hwnd, uint message)
+    {
+        if (NativeMethods.ChangeWindowMessageFilterEx(hwnd, message, NativeMethods.MSGFLT_ALLOW, IntPtr.Zero))
+        {
+            return;
+        }
+
+        var error = Marshal.GetLastWin32Error();
+        if (error != 0)
+        {
+            AppLogger.LogWarning($"ChangeWindowMessageFilterEx failed. message=0x{message:X}; win32={error}");
+        }
     }
 
     private async void Window_OnPreviewDrop(object sender, System.Windows.DragEventArgs e)
@@ -1227,37 +1321,105 @@ public partial class OverlayWindow : Window
 
     private static bool HasDroppedFiles(System.Windows.IDataObject data)
     {
-        return data.GetDataPresent(System.Windows.DataFormats.FileDrop)
-            || data.GetDataPresent("FileNameW")
-            || data.GetDataPresent("FileName");
+        foreach (var format in data.GetFormats())
+        {
+            try
+            {
+                if (ExtractDroppedPathsFromRawData(data.GetData(format)).Count > 0)
+                {
+                    return true;
+                }
+            }
+            catch
+            {
+                // Ignore unreadable format payload.
+            }
+        }
+
+        return false;
     }
 
     private static IReadOnlyList<string> ExtractDroppedPaths(System.Windows.IDataObject data)
     {
-        if (data.GetDataPresent(System.Windows.DataFormats.FileDrop) &&
-            data.GetData(System.Windows.DataFormats.FileDrop) is string[] standardPaths &&
-            standardPaths.Length > 0)
-        {
-            return standardPaths;
-        }
-
-        foreach (var format in new[] { "FileNameW", "FileName" })
+        foreach (var format in new[] { System.Windows.DataFormats.FileDrop, "FileNameW", "FileName" })
         {
             if (!data.GetDataPresent(format))
             {
                 continue;
             }
 
-            var raw = data.GetData(format);
-            if (raw is string single && !string.IsNullOrWhiteSpace(single))
+            IReadOnlyList<string> paths;
+            try
             {
-                return [single];
+                paths = ExtractDroppedPathsFromRawData(data.GetData(format));
+            }
+            catch
+            {
+                continue;
             }
 
-            if (raw is string[] many && many.Length > 0)
+            if (paths.Count > 0)
             {
-                return many;
+                return paths;
             }
+        }
+
+        foreach (var format in data.GetFormats())
+        {
+            IReadOnlyList<string> paths;
+            try
+            {
+                paths = ExtractDroppedPathsFromRawData(data.GetData(format));
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (paths.Count > 0)
+            {
+                return paths;
+            }
+        }
+
+        return [];
+    }
+
+    private static IReadOnlyList<string> ExtractDroppedPathsFromRawData(object? raw)
+    {
+        if (raw is null)
+        {
+            return [];
+        }
+
+        if (raw is string single)
+        {
+            return string.IsNullOrWhiteSpace(single) ? [] : [single];
+        }
+
+        if (raw is string[] paths)
+        {
+            return paths
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        if (raw is System.Collections.Specialized.StringCollection collection && collection.Count > 0)
+        {
+            return collection
+                .Cast<string>()
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        if (raw is IEnumerable<string> enumerable)
+        {
+            return enumerable
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
 
         return [];

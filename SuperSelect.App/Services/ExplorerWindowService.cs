@@ -19,21 +19,18 @@ internal sealed class ExplorerWindowService
             result.AddRange(GetLocationsFromWindowAutomation(filter));
         }
 
-        return result
-            .GroupBy(item => item.FullPath, StringComparer.OrdinalIgnoreCase)
-            .Select(group => group.First())
-            .OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        return DeduplicatePreservingOrder(result);
     }
 
     private static IEnumerable<FileCandidate> GetLocationsFromShellWindows(string filter)
     {
-        var result = new List<FileCandidate>();
+        var zOrderByHandle = GetExplorerWindowZOrderMap();
+        var result = new List<(int Rank, FileCandidate Candidate)>();
 
         var shellType = Type.GetTypeFromProgID("Shell.Application");
         if (shellType is null)
         {
-            return result;
+            return [];
         }
 
         object? shellObject = null;
@@ -44,11 +41,11 @@ internal sealed class ExplorerWindowService
             shellObject = Activator.CreateInstance(shellType);
             if (shellObject is null)
             {
-                return result;
+                return [];
             }
 
             windowsObject = shellType.InvokeMember("Windows", System.Reflection.BindingFlags.InvokeMethod, null, shellObject, null);
-            if (windowsObject is null) return result;
+            if (windowsObject is null) return [];
 
             var windowsType = windowsObject.GetType();
             var count = (int)windowsType.InvokeMember("Count", System.Reflection.BindingFlags.GetProperty, null, windowsObject, null)!;
@@ -81,8 +78,12 @@ internal sealed class ExplorerWindowService
                         continue;
                     }
 
+                    var handle = TryGetShellWindowHandle(window, windowType);
+                    var rank = zOrderByHandle.TryGetValue(handle, out var value)
+                        ? value
+                        : int.MaxValue;
                     var title = Convert.ToString(windowType.InvokeMember("LocationName", System.Reflection.BindingFlags.GetProperty, null, window, null));
-                    result.Add(CreateCandidate(folderPath, title));
+                    result.Add((rank, CreateCandidate(folderPath, title)));
                 }
                 catch
                 {
@@ -114,7 +115,10 @@ internal sealed class ExplorerWindowService
             }
         }
 
-        return result;
+        return result
+            .OrderBy(item => item.Rank)
+            .Select(item => item.Candidate)
+            .ToList();
     }
 
     private static IEnumerable<FileCandidate> GetLocationsFromWindowAutomation(string filter)
@@ -164,6 +168,69 @@ internal sealed class ExplorerWindowService
             IsDirectory = true,
             Source = CandidateSource.Explorer,
         };
+    }
+
+    private static Dictionary<IntPtr, int> GetExplorerWindowZOrderMap()
+    {
+        var rank = 0;
+        var orderByHandle = new Dictionary<IntPtr, int>();
+        _ = NativeMethods.EnumWindows(
+            (hwnd, _) =>
+            {
+                if (!NativeMethods.IsWindowVisible(hwnd))
+                {
+                    return true;
+                }
+
+                var className = NativeMethods.GetWindowClassName(hwnd);
+                if (string.Equals(className, "CabinetWClass", StringComparison.Ordinal) ||
+                    string.Equals(className, "ExploreWClass", StringComparison.Ordinal))
+                {
+                    orderByHandle[hwnd] = rank++;
+                }
+
+                return true;
+            },
+            IntPtr.Zero);
+
+        return orderByHandle;
+    }
+
+    private static IntPtr TryGetShellWindowHandle(object window, Type windowType)
+    {
+        try
+        {
+            var raw = windowType.InvokeMember("HWND", System.Reflection.BindingFlags.GetProperty, null, window, null);
+            return raw switch
+            {
+                int value32 => new IntPtr(value32),
+                long value64 => new IntPtr(value64),
+                IntPtr ptr => ptr,
+                _ => IntPtr.Zero,
+            };
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
+    }
+
+    private static IReadOnlyList<FileCandidate> DeduplicatePreservingOrder(IEnumerable<FileCandidate> items)
+    {
+        var result = new List<FileCandidate>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var item in items)
+        {
+            if (!seen.Add(item.FullPath))
+            {
+                continue;
+            }
+
+            result.Add(item);
+        }
+
+        return result;
     }
 
     private static string? ResolveExplorerPathFromShell(object window, Type windowType)

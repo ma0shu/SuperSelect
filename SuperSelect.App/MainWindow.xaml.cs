@@ -1,4 +1,6 @@
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
+using System.Linq;
 using System.Windows;
 using SuperSelect.App.Services;
 
@@ -149,5 +151,133 @@ public partial class MainWindow : Window
     {
         _trayRepository.Clear();
         RefreshTrayList();
+    }
+
+    private void TrayDropHost_OnPreviewDragOver(object sender, System.Windows.DragEventArgs e)
+    {
+        e.Effects = HasDroppedFiles(e.Data)
+            ? System.Windows.DragDropEffects.Copy
+            : System.Windows.DragDropEffects.None;
+        e.Handled = true;
+    }
+
+    private void TrayDropHost_OnPreviewDrop(object sender, System.Windows.DragEventArgs e)
+    {
+        var paths = ExtractDroppedPaths(e.Data);
+        if (paths.Count == 0)
+        {
+            e.Handled = true;
+            return;
+        }
+
+        _ = _trayRepository.AddMany(paths);
+        RefreshTrayList();
+        e.Handled = true;
+    }
+
+    private static bool HasDroppedFiles(System.Windows.IDataObject data)
+    {
+        foreach (var format in data.GetFormats())
+        {
+            try
+            {
+                if (ExtractDroppedPathsFromRawData(data.GetData(format)).Count > 0)
+                {
+                    return true;
+                }
+            }
+            catch
+            {
+                // Ignore unreadable format payload.
+            }
+        }
+
+        return false;
+    }
+
+    private static IReadOnlyList<string> ExtractDroppedPaths(System.Windows.IDataObject data)
+    {
+        foreach (var format in new[] { System.Windows.DataFormats.FileDrop, "FileNameW", "FileName" })
+        {
+            if (!data.GetDataPresent(format))
+            {
+                continue;
+            }
+
+            IReadOnlyList<string> paths;
+            try
+            {
+                paths = ExtractDroppedPathsFromRawData(data.GetData(format));
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (paths.Count > 0)
+            {
+                return paths;
+            }
+        }
+
+        foreach (var format in data.GetFormats())
+        {
+            IReadOnlyList<string> paths;
+            try
+            {
+                paths = ExtractDroppedPathsFromRawData(data.GetData(format));
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (paths.Count > 0)
+            {
+                return paths;
+            }
+        }
+
+        return [];
+    }
+
+    private static IReadOnlyList<string> ExtractDroppedPathsFromRawData(object? raw)
+    {
+        if (raw is null)
+        {
+            return [];
+        }
+
+        if (raw is string single)
+        {
+            return string.IsNullOrWhiteSpace(single) ? [] : [single];
+        }
+
+        if (raw is string[] paths)
+        {
+            return paths
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        if (raw is StringCollection collection && collection.Count > 0)
+        {
+            return collection
+                .Cast<string>()
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        if (raw is IEnumerable<string> enumerable)
+        {
+            return enumerable
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        return [];
     }
 }

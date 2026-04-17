@@ -1,3 +1,4 @@
+<!--TODO: FEAT: 默认不记忆上次使用的功能，默认为搜索。如果后台有资源管理器，默认为资源管理器路径标签页，且顺序为资源管理器最近使用先后顺序，但此时一旦开始在输入框输入自动切换到搜索；去掉资源管理器路径：x条和最近文件x条的提示。FIX:无法拖动文件/文件夹进入托盘 FEAT: 快捷键唤起主界面 FEAT: UI优化 -->
 <Window x:Class="SuperSelect.App.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -33,9 +34,13 @@
         <TextBlock Grid.Row="1"
                    Margin="0,28,0,12"
                    TextWrapping="Wrap"
-                   Text="运行后会监听系统文件对话框，并在对话框下方弹出一行快速面板。面板支持 Everything 搜索、最近文件、托盘文件和资源管理器路径跳转。" />
+                   Text="运行后会监听系统文件对话框，并在对话框下方弹出一行快速面板。面板支持 Everything 搜索、最近文件、托盘文件和资源管理器路径跳转。全局快捷键 Ctrl+Shift+Z 可在任意位置唤起本窗口。" />
 
-        <GroupBox Grid.Row="2" Header="文件托盘">
+        <GroupBox Grid.Row="2"
+                  Header="文件托盘"
+                  AllowDrop="True"
+                  PreviewDragOver="TrayDropHost_OnPreviewDragOver"
+                  PreviewDrop="TrayDropHost_OnPreviewDrop">
             <DockPanel Margin="8">
                 <StackPanel DockPanel.Dock="Bottom"
                             Orientation="Horizontal"
@@ -57,7 +62,10 @@
                     <Button Width="96"
                             Click="ClearButton_OnClick">清空托盘</Button>
                 </StackPanel>
-                <ListBox x:Name="TrayList" />
+                <ListBox x:Name="TrayList"
+                         AllowDrop="True"
+                         PreviewDragOver="TrayDropHost_OnPreviewDragOver"
+                         PreviewDrop="TrayDropHost_OnPreviewDrop" />
             </DockPanel>
         </GroupBox>
 

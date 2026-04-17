@@ -25,6 +25,14 @@ internal static class NativeMethods
     internal const uint SWP_NOZORDER = 0x0004;
     internal const uint SWP_NOACTIVATE = 0x0010;
     internal const int GWL_HWNDPARENT = -8;
+    internal const uint WM_DROPFILES = 0x0233;
+    internal const uint WM_COPYDATA = 0x004A;
+    internal const uint WM_COPYGLOBALDATA = 0x0049;
+    internal const int WM_HOTKEY = 0x0312;
+    internal const uint MSGFLT_ALLOW = 1;
+    internal const uint MOD_ALT = 0x0001;
+    internal const uint MOD_CONTROL = 0x0002;
+    internal const uint MOD_SHIFT = 0x0004;
 
     internal delegate void WinEventDelegate(
         IntPtr hWinEventHook,
@@ -121,6 +129,29 @@ internal static class NativeMethods
         int cx,
         int cy,
         uint uFlags);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool ChangeWindowMessageFilterEx(
+        IntPtr hWnd,
+        uint message,
+        uint action,
+        IntPtr pChangeFilterStruct);
+
+    [DllImport("shell32.dll")]
+    internal static extern void DragAcceptFiles(IntPtr hWnd, [MarshalAs(UnmanagedType.Bool)] bool fAccept);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool RegisterHotKey(
+        IntPtr hWnd,
+        int id,
+        uint fsModifiers,
+        uint vk);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     internal static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, string lParam);
