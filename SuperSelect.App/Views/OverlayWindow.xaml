@@ -5,16 +5,15 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d"
         ShowInTaskbar="False"
-        Topmost="True"
         WindowStyle="None"
         ResizeMode="NoResize"
         AllowsTransparency="True"
         AllowDrop="True"
         Background="Transparent"
         Width="900"
-        Height="108"
+        Height="66"
         MinWidth="560"
-        MinHeight="108"
+        MinHeight="66"
         PreviewDragOver="Window_OnPreviewDragOver"
         PreviewDrop="Window_OnPreviewDrop">
     <Window.Resources>
@@ -259,10 +258,22 @@
                          PreviewMouseWheel="ResultList_OnPreviewMouseWheel"
                          SelectionChanged="ResultList_OnSelectionChanged"
                          MouseDoubleClick="ResultList_OnMouseDoubleClick"
-                         KeyDown="ResultList_OnKeyDown">
+                         KeyDown="ResultList_OnKeyDown"
+                         ContextMenuOpening="ResultList_OnContextMenuOpening">
                     <ListBox.Resources>
                         <Style TargetType="{x:Type ScrollBar}" BasedOn="{StaticResource SlimScrollBarStyle}" />
+                        <ContextMenu x:Key="TrayContextMenu" DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                            <MenuItem Header="置顶" Click="TrayMenuItem_Pin_OnClick" />
+                            <MenuItem Header="删除" Click="TrayMenuItem_Delete_OnClick" />
+                        </ContextMenu>
                     </ListBox.Resources>
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem">
+                            <Setter Property="ContextMenu" Value="{StaticResource TrayContextMenu}" />
+                            <Setter Property="Padding" Value="4"/>
+                            <EventSetter Event="PreviewMouseRightButtonDown" Handler="ListBoxItem_PreviewMouseRightButtonDown" />
+                        </Style>
+                    </ListBox.ItemContainerStyle>
                     <ListBox.ItemTemplate>
                         <DataTemplate>
                             <StackPanel Margin="4">

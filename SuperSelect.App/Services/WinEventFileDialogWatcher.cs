@@ -130,6 +130,17 @@ internal sealed class WinEventFileDialogWatcher : IDisposable
             return;
         }
 
+        if (eventType == NativeMethods.EVENT_OBJECT_LOCATIONCHANGE)
+        {
+            if (_activeDialog != IntPtr.Zero && hwnd == _activeDialog)
+            {
+                _ = _dispatcher.BeginInvoke(
+                    DispatcherPriority.Render,
+                    new Action(() => EvaluateActiveDialog(eventType, hwnd)));
+            }
+            return;
+        }
+
         _ = _dispatcher.BeginInvoke(
             DispatcherPriority.Input,
             new Action(() => EvaluateActiveDialog(eventType, hwnd)));

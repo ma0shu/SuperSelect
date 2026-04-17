@@ -16,11 +16,12 @@ public partial class OverlayWindow : Window
 {
     private sealed record OptionItem<T>(string Label, T Value);
 
+    private const double UltraCompactHeightDip = 66.0;
     private const double CompactHeightDip = 108.0;
     private const double ExpandedHeightDip = 350.0;
-    private const double MinUsableHeightDip = 72.0;
+    private const double MinUsableHeightDip = 66.0;
     private const double HeaderAndStatusHeightDip = 112.0;
-    private const int OverlayGapPx = 8;
+    private const int OverlayGapPx = 0;
     private const int QueryResultLimit = 5000;
 
     private readonly EverythingService _everythingService;
@@ -90,18 +91,37 @@ public partial class OverlayWindow : Window
     {
         _dialogHwnd = dialogHwnd;
         _dialogController = new FileDialogAutomationController(dialogHwnd);
-        _isFolderDialog = _dialogController.IsFolderSelectionDialog();
-        _lastFileTypeFilterText = _dialogController.GetCurrentFileTypeFilterText();
+        
+        Task.Run(() =>
+        {
+            var isFolder = _dialogController.IsFolderSelectionDialog();
+            var filter = _dialogController.GetCurrentFileTypeFilterText();
+            _ = Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (_dialogHwnd != dialogHwnd) return;
+                _isFolderDialog = isFolder;
+                _lastFileTypeFilterText = filter;
+                ApplyModeUiState();
+                _ = RefreshCandidatesAsync(immediate: true);
+            }));
+        });
+
         ApplyModeUiState();
 
         if (!IsVisible)
         {
+            var overlayHwnd = new WindowInteropHelper(this).EnsureHandle();
+            NativeMethods.SetWindowLongPtrEx(overlayHwnd, NativeMethods.GWL_HWNDPARENT, _dialogHwnd);
             Show();
+        }
+        else
+        {
+            var overlayHwnd = new WindowInteropHelper(this).Handle;
+            NativeMethods.SetWindowLongPtrEx(overlayHwnd, NativeMethods.GWL_HWNDPARENT, _dialogHwnd);
         }
 
         _dialogMonitorTimer.Start();
         PositionToDialog();
-        _ = RefreshCandidatesAsync(immediate: true);
     }
 
     public void DetachDialog()
@@ -118,11 +138,18 @@ public partial class OverlayWindow : Window
         _refreshCts = null;
 
         _items.Clear();
+        SearchBox.Text = string.Empty;
         ResultHost.Visibility = Visibility.Collapsed;
-        Height = CompactHeightDip;
+        SetStatus(null);
+        Height = UltraCompactHeightDip;
 
         if (IsVisible)
         {
+            var overlayHwnd = new WindowInteropHelper(this).Handle;
+            if (overlayHwnd != IntPtr.Zero)
+            {
+                NativeMethods.SetWindowLongPtrEx(overlayHwnd, NativeMethods.GWL_HWNDPARENT, IntPtr.Zero);
+            }
             Hide();
         }
     }
@@ -154,8 +181,8 @@ public partial class OverlayWindow : Window
 
         if (mode == OverlayMode.Search && string.IsNullOrWhiteSpace(keyword))
         {
+            SetStatus(null);
             UpdateItems([]);
-            SetStatus(_isFolderDialog ? "输入关键字开始搜索文件夹。" : "输入关键字开始搜索。");
             return;
         }
 
@@ -213,10 +240,7 @@ public partial class OverlayWindow : Window
                         items = items.Where(candidate => candidate.IsDirectory).ToList();
                     }
 
-                    statusMessage = items.Count == 0
-                        ? (_isFolderDialog ? "托盘中没有可用文件夹，可直接拖入文件夹。"
-                                           : "托盘为空，可直接把文件拖进面板。")
-                        : $"{(_isFolderDialog ? "托盘文件夹" : "托盘文件")}：{items.Count} 条。";
+                    statusMessage = items.Count == 0 ? null : $"{(_isFolderDialog ? "托盘文件夹" : "托盘文件")}：{items.Count} 条。";
                     break;
                 case OverlayMode.Explorer:
                     items = _explorerWindowService.GetOpenLocations(string.Empty);
@@ -270,10 +294,7 @@ public partial class OverlayWindow : Window
             statusMessage = $"{statusMessage}（文件夹选择模式）";
         }
 
-        if (!string.IsNullOrWhiteSpace(statusMessage))
-        {
-            SetStatus(statusMessage);
-        }
+        SetStatus(string.IsNullOrWhiteSpace(statusMessage) ? null : statusMessage);
 
         UpdateItems(items);
     }
@@ -298,7 +319,9 @@ public partial class OverlayWindow : Window
         }
 
         ResultHost.Visibility = _items.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-        Height = _items.Count > 0 ? ExpandedHeightDip : CompactHeightDip;
+        var statusVisible = StatusText.Visibility == Visibility.Visible;
+        var baseCompactHeight = statusVisible ? CompactHeightDip : UltraCompactHeightDip;
+        Height = _items.Count > 0 ? ExpandedHeightDip : baseCompactHeight;
 
         if (changed ||
             previousVisibility != ResultHost.Visibility ||
@@ -387,9 +410,18 @@ public partial class OverlayWindow : Window
         ResultHost.Height = Math.Max(ResultHost.MinHeight, computed);
     }
 
-    private void SetStatus(string message)
+    private void SetStatus(string? message)
     {
-        StatusText.Text = message;
+        if (string.IsNullOrEmpty(message))
+        {
+            StatusText.Visibility = Visibility.Collapsed;
+            StatusText.Text = string.Empty;
+        }
+        else
+        {
+            StatusText.Visibility = Visibility.Visible;
+            StatusText.Text = message;
+        }
     }
 
     private EverythingSortOption CurrentSort =>
@@ -418,7 +450,25 @@ public partial class OverlayWindow : Window
                 return;
             }
 
-            var folderMode = _dialogController.IsFolderSelectionDialog();
+            var controller = _dialogController;
+            var isTypeFilterActive = IsTypeFilterActive;
+            var currentMode = _currentMode;
+
+            var folderModeTask = Task.Run(() => controller.IsFolderSelectionDialog());
+            var filterTextTask = Task.Run(() => 
+            {
+                if (isTypeFilterActive && currentMode != OverlayMode.Explorer)
+                {
+                    return controller.GetCurrentFileTypeFilterText();
+                }
+                return _lastFileTypeFilterText;
+            });
+
+            await Task.WhenAll(folderModeTask, filterTextTask);
+
+            if (_dialogController != controller) return;
+
+            var folderMode = folderModeTask.Result;
             var folderModeChanged = folderMode != _isFolderDialog;
             if (folderModeChanged)
             {
@@ -427,9 +477,9 @@ public partial class OverlayWindow : Window
             }
 
             var filterChanged = false;
-            if (IsTypeFilterActive && _currentMode != OverlayMode.Explorer)
+            if (isTypeFilterActive && currentMode != OverlayMode.Explorer)
             {
-                var filterText = _dialogController.GetCurrentFileTypeFilterText();
+                var filterText = filterTextTask.Result;
                 filterChanged = !string.Equals(filterText, _lastFileTypeFilterText, StringComparison.OrdinalIgnoreCase);
                 if (filterChanged)
                 {
@@ -484,6 +534,11 @@ public partial class OverlayWindow : Window
     private void ResultList_OnSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_suppressSingleSelect || ResultList.SelectedItem is not FileCandidate candidate)
+        {
+            return;
+        }
+
+        if (Mouse.RightButton == MouseButtonState.Pressed)
         {
             return;
         }
@@ -667,6 +722,44 @@ public partial class OverlayWindow : Window
         }
 
         e.Handled = true;
+    }
+
+    private void ResultList_OnContextMenuOpening(object sender, ContextMenuEventArgs e)
+    {
+        if (_currentMode != OverlayMode.Tray)
+        {
+            e.Handled = true;
+        }
+    }
+
+    private void ListBoxItem_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (_currentMode == OverlayMode.Tray && sender is ListBoxItem { ContextMenu: { } menu } item)
+        {
+            menu.PlacementTarget = item;
+            menu.IsOpen = true;
+            e.Handled = true;
+        }
+    }
+
+    private void TrayMenuItem_Pin_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuItem menuItem && 
+            menuItem.DataContext is FileCandidate candidate)
+        {
+            _trayRepository.PinToTop(candidate.FullPath);
+            _ = RefreshCandidatesAsync(immediate: true);
+        }
+    }
+
+    private void TrayMenuItem_Delete_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuItem menuItem && 
+            menuItem.DataContext is FileCandidate candidate)
+        {
+            _trayRepository.Remove(candidate.FullPath);
+            _ = RefreshCandidatesAsync(immediate: true);
+        }
     }
 
     private void Window_OnPreviewDragOver(object sender, System.Windows.DragEventArgs e)

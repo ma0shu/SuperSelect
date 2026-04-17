@@ -50,26 +50,20 @@ internal sealed class FileDialogAutomationController
             return false;
         }
 
-        try
+        // Modern File Dialogs
+        if (NativeMethods.FindWindowEx(hwnd, IntPtr.Zero, "DUIViewWndClassName", null) != IntPtr.Zero)
         {
-            var root = AutomationElement.FromHandle(hwnd);
-            if (root is null)
-            {
-                return false;
-            }
-
-            var hasConfirmButton = FindConfirmButton(root) is not null;
-            if (!hasConfirmButton)
-            {
-                return false;
-            }
-
-            return FindFileNameEdit(root) is not null || HasCandidateListControl(root);
+            return true;
         }
-        catch
+
+        // Older File Dialogs
+        if (NativeMethods.FindWindowEx(hwnd, IntPtr.Zero, "ComboBoxEx32", null) != IntPtr.Zero ||
+            NativeMethods.GetDlgItem(hwnd, 1148) != IntPtr.Zero)
         {
-            return false;
+            return true;
         }
+
+        return false;
     }
 
     public bool TryPrimeSelection(FileCandidate candidate)
@@ -227,33 +221,21 @@ internal sealed class FileDialogAutomationController
 
     public bool IsFolderSelectionDialog()
     {
-        try
-        {
-            var root = TryGetRoot();
-            if (root is null)
-            {
-                return false;
-            }
-
-            var title = root.Current.Name;
-            if (!string.IsNullOrWhiteSpace(title) && ContainsAny(title, FolderDialogTitleKeywords))
-            {
-                return true;
-            }
-
-            var confirm = FindConfirmButton(root);
-            var confirmText = confirm?.Current.Name;
-            if (!string.IsNullOrWhiteSpace(confirmText) && ContainsAny(confirmText, FolderConfirmKeywords))
-            {
-                return true;
-            }
-
-            return false;
-        }
-        catch
+        if (_dialogHwnd == IntPtr.Zero || !NativeMethods.IsWindow(_dialogHwnd))
         {
             return false;
         }
+
+        var sb = new System.Text.StringBuilder(256);
+        NativeMethods.GetWindowText(_dialogHwnd, sb, sb.Capacity);
+        var title = sb.ToString();
+
+        if (!string.IsNullOrWhiteSpace(title) && ContainsAny(title, FolderDialogTitleKeywords))
+        {
+            return true;
+        }
+
+        return false;
     }
 
     private void TryActivateDialog()

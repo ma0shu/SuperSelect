@@ -8,7 +8,7 @@ internal sealed class TrayRepository
 {
     private readonly object _syncRoot = new();
     private readonly string _storePath;
-    private readonly HashSet<string> _paths;
+    private readonly List<string> _paths;
 
     public TrayRepository()
     {
@@ -46,8 +46,9 @@ internal sealed class TrayRepository
                     continue;
                 }
 
-                if (_paths.Add(normalized))
+                if (!_paths.Contains(normalized, StringComparer.OrdinalIgnoreCase))
                 {
+                    _paths.Add(normalized);
                     added++;
                 }
             }
@@ -71,13 +72,35 @@ internal sealed class TrayRepository
 
         lock (_syncRoot)
         {
-            var removed = _paths.Remove(normalized);
-            if (removed)
+            var idx = _paths.FindIndex(p => string.Equals(p, normalized, StringComparison.OrdinalIgnoreCase));
+            if (idx >= 0)
             {
+                _paths.RemoveAt(idx);
                 SaveLocked();
+                return true;
             }
 
-            return removed;
+            return false;
+        }
+    }
+
+    public void PinToTop(string path)
+    {
+        var normalized = NormalizePath(path);
+        if (normalized is null)
+        {
+            return;
+        }
+
+        lock (_syncRoot)
+        {
+            var idx = _paths.FindIndex(p => string.Equals(p, normalized, StringComparison.OrdinalIgnoreCase));
+            if (idx > 0)
+            {
+                _paths.RemoveAt(idx);
+                _paths.Insert(0, normalized);
+                SaveLocked();
+            }
         }
     }
 
@@ -96,9 +119,15 @@ internal sealed class TrayRepository
 
         lock (_syncRoot)
         {
-            return _paths
-                .Where(path => string.IsNullOrWhiteSpace(filter) || PathMatches(path, filter))
-                .OrderBy(path => Path.GetFileName(path), StringComparer.OrdinalIgnoreCase)
+            var query = _paths.Where(path => string.IsNullOrWhiteSpace(filter) || PathMatches(path, filter));
+            
+            // If filtering, sort by match quality, otherwise keep order
+            if (!string.IsNullOrWhiteSpace(filter))
+            {
+                query = query.OrderBy(path => Path.GetFileName(path), StringComparer.OrdinalIgnoreCase);
+            }
+
+            return query
                 .Select(
                     path =>
                     {
@@ -116,11 +145,11 @@ internal sealed class TrayRepository
         }
     }
 
-    private HashSet<string> Load()
+    private List<string> Load()
     {
         if (!File.Exists(_storePath))
         {
-            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            return new List<string>();
         }
 
         try
@@ -130,20 +159,21 @@ internal sealed class TrayRepository
             var normalized = paths
                 .Select(NormalizePath)
                 .Where(path => path is not null)!
-                .Cast<string>();
+                .Cast<string>()
+                .Distinct(StringComparer.OrdinalIgnoreCase);
 
-            return new HashSet<string>(normalized, StringComparer.OrdinalIgnoreCase);
+            return normalized.ToList();
         }
         catch
         {
-            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            return new List<string>();
         }
     }
 
     private void SaveLocked()
     {
         var payload = JsonSerializer.Serialize(
-            _paths.OrderBy(path => path, StringComparer.OrdinalIgnoreCase),
+            _paths,
             new JsonSerializerOptions { WriteIndented = true });
 
         File.WriteAllText(_storePath, payload);

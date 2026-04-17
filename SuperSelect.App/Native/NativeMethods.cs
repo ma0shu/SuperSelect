@@ -22,6 +22,7 @@ internal static class NativeMethods
     internal const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
     internal const uint SWP_NOZORDER = 0x0004;
     internal const uint SWP_NOACTIVATE = 0x0010;
+    internal const int GWL_HWNDPARENT = -8;
 
     internal delegate void WinEventDelegate(
         IntPtr hWinEventHook,
@@ -124,6 +125,33 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     internal static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    internal static extern IntPtr GetDlgItem(IntPtr hDlg, int nIDDlg);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    internal static extern IntPtr FindWindowEx(IntPtr hwndParent, IntPtr hwndChildAfter, string lpszClass, string? lpszWindow);
+
+    [DllImport("user32.dll")]
+    internal static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLong")]
+    internal static extern IntPtr SetWindowLong32(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+    public static IntPtr SetWindowLongPtrEx(IntPtr hWnd, int nIndex, IntPtr dwNewLong)
+    {
+        if (IntPtr.Size == 8)
+        {
+            return SetWindowLongPtr(hWnd, nIndex, dwNewLong);
+        }
+        else
+        {
+            return SetWindowLong32(hWnd, nIndex, dwNewLong);
+        }
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    internal static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetClassNameW(IntPtr hWnd, StringBuilder className, int maxCount);
