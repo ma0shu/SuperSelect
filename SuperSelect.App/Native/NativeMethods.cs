@@ -24,6 +24,8 @@ internal static class NativeMethods
     internal const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
     internal const uint SWP_NOZORDER = 0x0004;
     internal const uint SWP_NOACTIVATE = 0x0010;
+    internal const uint SWP_ASYNCWINDOWPOS = 0x4000;
+    internal const uint SWP_NOSENDCHANGING = 0x0400;
     internal const int GWL_HWNDPARENT = -8;
     internal const uint WM_DROPFILES = 0x0233;
     internal const uint WM_COPYDATA = 0x004A;

@@ -6,9 +6,12 @@ namespace SuperSelect.App.Services;
 
 internal sealed class TrayRepository
 {
+    private static readonly JsonSerializerOptions WriteOptions = new() { WriteIndented = true };
+
     private readonly object _syncRoot = new();
     private readonly string _storePath;
     private readonly List<string> _paths;
+    private readonly HashSet<string> _pathIndex;
 
     public TrayRepository()
     {
@@ -19,6 +22,7 @@ internal sealed class TrayRepository
         Directory.CreateDirectory(storeDirectory);
         _storePath = Path.Combine(storeDirectory, "tray.json");
         _paths = Load();
+        _pathIndex = new HashSet<string>(_paths, StringComparer.OrdinalIgnoreCase);
     }
 
     public int Count
@@ -46,7 +50,7 @@ internal sealed class TrayRepository
                     continue;
                 }
 
-                if (!_paths.Contains(normalized, StringComparer.OrdinalIgnoreCase))
+                if (_pathIndex.Add(normalized))
                 {
                     _paths.Add(normalized);
                     added++;
@@ -72,6 +76,11 @@ internal sealed class TrayRepository
 
         lock (_syncRoot)
         {
+            if (!_pathIndex.Remove(normalized))
+            {
+                return false;
+            }
+
             var idx = _paths.FindIndex(p => string.Equals(p, normalized, StringComparison.OrdinalIgnoreCase));
             if (idx >= 0)
             {
@@ -80,6 +89,7 @@ internal sealed class TrayRepository
                 return true;
             }
 
+            _pathIndex.Add(normalized);
             return false;
         }
     }
@@ -109,6 +119,7 @@ internal sealed class TrayRepository
         lock (_syncRoot)
         {
             _paths.Clear();
+            _pathIndex.Clear();
             SaveLocked();
         }
     }
@@ -120,32 +131,38 @@ internal sealed class TrayRepository
 
         lock (_syncRoot)
         {
-            snapshot = _paths.ToList();
+            snapshot = new List<string>(_paths);
         }
 
-        var query = snapshot.Where(path => string.IsNullOrWhiteSpace(filter) || PathMatches(path, filter));
-
-        // If filtering, sort by match quality, otherwise keep original order.
-        if (!string.IsNullOrWhiteSpace(filter))
+        if (snapshot.Count == 0)
         {
-            query = query.OrderBy(path => Path.GetFileName(path), StringComparer.OrdinalIgnoreCase);
+            return [];
         }
 
-        return query
-            .Select(
-                path =>
-                {
-                    var fileName = Path.GetFileName(path);
-                    return new FileCandidate
-                    {
-                        FullPath = path,
-                        DisplayName = string.IsNullOrWhiteSpace(fileName) ? path : fileName,
-                        SecondaryText = Path.GetDirectoryName(path) ?? string.Empty,
-                        IsDirectory = Directory.Exists(path),
-                        Source = CandidateSource.Tray,
-                    };
-                })
-            .ToList();
+        if (string.IsNullOrWhiteSpace(filter))
+        {
+            return BuildCandidates(snapshot);
+        }
+
+        var matched = new List<string>(snapshot.Count);
+        for (var i = 0; i < snapshot.Count; i++)
+        {
+            var path = snapshot[i];
+            if (PathMatches(path, filter))
+            {
+                matched.Add(path);
+            }
+        }
+
+        if (matched.Count == 0)
+        {
+            return [];
+        }
+
+        matched.Sort(
+            static (left, right) =>
+                StringComparer.OrdinalIgnoreCase.Compare(Path.GetFileName(left), Path.GetFileName(right)));
+        return BuildCandidates(matched);
     }
 
     private List<string> Load()
@@ -159,13 +176,20 @@ internal sealed class TrayRepository
         {
             var json = File.ReadAllText(_storePath);
             var paths = JsonSerializer.Deserialize<List<string>>(json) ?? [];
-            var normalized = paths
-                .Select(NormalizePath)
-                .Where(path => path is not null)!
-                .Cast<string>()
-                .Distinct(StringComparer.OrdinalIgnoreCase);
+            var result = new List<string>(paths.Count);
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (var i = 0; i < paths.Count; i++)
+            {
+                var normalized = NormalizePath(paths[i]);
+                if (normalized is null || !seen.Add(normalized))
+                {
+                    continue;
+                }
 
-            return normalized.ToList();
+                result.Add(normalized);
+            }
+
+            return result;
         }
         catch
         {
@@ -175,11 +199,29 @@ internal sealed class TrayRepository
 
     private void SaveLocked()
     {
-        var payload = JsonSerializer.Serialize(
-            _paths,
-            new JsonSerializerOptions { WriteIndented = true });
-
+        var payload = JsonSerializer.Serialize(_paths, WriteOptions);
         File.WriteAllText(_storePath, payload);
+    }
+
+    private static IReadOnlyList<FileCandidate> BuildCandidates(IReadOnlyList<string> paths)
+    {
+        var result = new List<FileCandidate>(paths.Count);
+        for (var i = 0; i < paths.Count; i++)
+        {
+            var path = paths[i];
+            var fileName = Path.GetFileName(path);
+            result.Add(
+                new FileCandidate
+                {
+                    FullPath = path,
+                    DisplayName = string.IsNullOrWhiteSpace(fileName) ? path : fileName,
+                    SecondaryText = Path.GetDirectoryName(path) ?? string.Empty,
+                    IsDirectory = Directory.Exists(path),
+                    Source = CandidateSource.Tray,
+                });
+        }
+
+        return result;
     }
 
     private static bool PathMatches(string path, string filter)

@@ -31,6 +31,7 @@ public partial class OverlayWindow : Window
     private const int DisplayResultLimit = 400;
     private const int TypeFilterScanPageSize = 2000;
     private const int AutomationActionTimeoutMs = 900;
+    private const int SearchDebounceIntervalMs = 80;
     private static readonly TimeSpan DialogMonitorLivenessInterval = TimeSpan.FromMilliseconds(140);
     private static readonly TimeSpan DialogMonitorBusyInterval = TimeSpan.FromMilliseconds(380);
     private static readonly TimeSpan DialogMonitorIdleInterval = TimeSpan.FromMilliseconds(760);
@@ -44,6 +45,8 @@ public partial class OverlayWindow : Window
     private readonly ObservableCollection<FileCandidate> _items = [];
     private readonly DispatcherTimer _searchDebounceTimer;
     private readonly DispatcherTimer _dialogMonitorTimer;
+    private readonly DispatcherTimer _positionUpdateTimer;
+    private readonly DispatcherTimer _dialogRectPollTimer;
     private readonly List<OptionItem<EverythingSortOption>> _sortOptions;
     private readonly SemaphoreSlim _automationOperationGate = new(1, 1);
 
@@ -69,6 +72,12 @@ public partial class OverlayWindow : Window
     private readonly object _refreshRequestSync = new();
     private bool _allowClose;
     private bool _dropInteropConfigured;
+    private bool _positionUpdateRequested;
+    private bool _hasAppliedPosition;
+    private int _lastOverlayLeftPx;
+    private int _lastOverlayTopPx;
+    private int _lastOverlayWidthPx;
+    private int _lastOverlayHeightPx;
 
     internal OverlayWindow(
         EverythingService everythingService,
@@ -96,17 +105,65 @@ public partial class OverlayWindow : Window
 
         _searchDebounceTimer = new DispatcherTimer
         {
-            Interval = TimeSpan.FromMilliseconds(180),
+            Interval = TimeSpan.FromMilliseconds(SearchDebounceIntervalMs),
         };
         _searchDebounceTimer.Tick += SearchDebounceTimer_OnTick;
         _dialogMonitorTimer = new DispatcherTimer();
         _dialogMonitorTimer.Tick += DialogMonitorTimer_OnTick;
+        _positionUpdateTimer = new DispatcherTimer(DispatcherPriority.Render)
+        {
+            Interval = TimeSpan.FromMilliseconds(16)
+        };
+        _positionUpdateTimer.Tick += PositionUpdateTimer_OnTick;
+        _dialogRectPollTimer = new DispatcherTimer(DispatcherPriority.Send)
+        {
+            Interval = TimeSpan.FromMilliseconds(16)
+        };
+        _dialogRectPollTimer.Tick += DialogRectPollTimer_OnTick;
 
         ResultList.ItemsSource = _items;
         ApplyModeUiState();
         UpdateSortButtonLabel();
 
         ShowActivated = false;
+    }
+
+    private void PositionUpdateTimer_OnTick(object? sender, EventArgs e)
+    {
+        if (!_positionUpdateRequested)
+        {
+            _positionUpdateTimer.Stop();
+            return;
+        }
+
+        _positionUpdateRequested = false;
+        _positionUpdateTimer.Stop();
+        PositionToDialog();
+    }
+
+    private void RequestPositionUpdate()
+    {
+        if (!IsVisible || _dialogHwnd == IntPtr.Zero)
+        {
+            return;
+        }
+
+        _positionUpdateRequested = true;
+        if (!_positionUpdateTimer.IsEnabled)
+        {
+            _positionUpdateTimer.Start();
+        }
+    }
+
+    private void DialogRectPollTimer_OnTick(object? sender, EventArgs e)
+    {
+        if (!IsVisible || _dialogHwnd == IntPtr.Zero || !NativeMethods.IsWindow(_dialogHwnd))
+        {
+            _dialogRectPollTimer.Stop();
+            return;
+        }
+
+        PositionToDialog();
     }
 
     public void AttachToDialog(IntPtr dialogHwnd)
@@ -164,6 +221,10 @@ public partial class OverlayWindow : Window
         _lastDialogSnapshotProbeUtc = DateTime.MinValue;
         _dialogMonitorTimer.Interval = DialogMonitorLivenessInterval;
         _dialogMonitorTimer.Start();
+        if (!_dialogRectPollTimer.IsEnabled)
+        {
+            _dialogRectPollTimer.Start();
+        }
         PositionToDialog();
         RequestCandidatesRefresh(immediate: true);
     }
@@ -174,6 +235,9 @@ public partial class OverlayWindow : Window
         _dialogController = null;
         _wheelDeltaAccumulator = 0;
         _dialogMonitorTimer.Stop();
+        _dialogRectPollTimer.Stop();
+        _positionUpdateTimer.Stop();
+        _positionUpdateRequested = false;
         Interlocked.Exchange(ref _dialogMonitorInFlight, 0);
         _lastDialogSnapshotProbeUtc = DateTime.MinValue;
         _lastFolderStateProbeUtc = DateTime.MinValue;
@@ -192,6 +256,11 @@ public partial class OverlayWindow : Window
         SetStatus(null);
         SetResultSummary(null);
         Height = UltraCompactHeightDip;
+        _hasAppliedPosition = false;
+        _lastOverlayLeftPx = 0;
+        _lastOverlayTopPx = 0;
+        _lastOverlayWidthPx = 0;
+        _lastOverlayHeightPx = 0;
 
         if (IsVisible)
         {
@@ -211,7 +280,7 @@ public partial class OverlayWindow : Window
             return;
         }
 
-        PositionToDialog();
+        RequestPositionUpdate();
     }
 
     public void Shutdown()
@@ -253,7 +322,7 @@ public partial class OverlayWindow : Window
         }
 
         _ = Dispatcher.BeginInvoke(
-            DispatcherPriority.Background,
+            DispatcherPriority.Input,
             new Action(() => _ = ProcessRefreshLoopAsync()));
     }
 
@@ -289,7 +358,7 @@ public partial class OverlayWindow : Window
                 Interlocked.CompareExchange(ref _refreshLoopInFlight, 1, 0) == 0)
             {
                 _ = Dispatcher.BeginInvoke(
-                    DispatcherPriority.Background,
+                    DispatcherPriority.Input,
                     new Action(() => _ = ProcessRefreshLoopAsync()));
             }
         }
@@ -330,23 +399,6 @@ public partial class OverlayWindow : Window
             SetResultSummary(null);
             UpdateItems([]);
             return;
-        }
-
-        if (IsRefreshObsolete(requestVersion, token))
-        {
-            return;
-        }
-
-        if (!immediate)
-        {
-            try
-            {
-                await Task.Delay(15, token);
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
         }
 
         if (IsRefreshObsolete(requestVersion, token))
@@ -756,7 +808,7 @@ public partial class OverlayWindow : Window
             previousVisibility != ResultHost.Visibility ||
             Math.Abs(previousHeight - Height) > 0.5)
         {
-            PositionToDialog();
+            RequestPositionUpdate();
         }
     }
 
@@ -767,7 +819,15 @@ public partial class OverlayWindow : Window
             return;
         }
 
-        if (NativeMethods.DwmGetWindowAttribute(_dialogHwnd, NativeMethods.DWMWA_EXTENDED_FRAME_BOUNDS, out var extRect, Marshal.SizeOf(typeof(NativeMethods.RECT))) == 0)
+        // Win10/11 file dialogs include an invisible resize border in GetWindowRect.
+        // Use the visual frame bounds when available to remove the alignment gap.
+        if (NativeMethods.DwmGetWindowAttribute(
+                _dialogHwnd,
+                NativeMethods.DWMWA_EXTENDED_FRAME_BOUNDS,
+                out var extRect,
+                Marshal.SizeOf(typeof(NativeMethods.RECT))) == 0 &&
+            extRect.Width > 0 &&
+            extRect.Height > 0)
         {
             rect = extRect;
         }
@@ -812,6 +872,21 @@ public partial class OverlayWindow : Window
 
         UpdateResultHostHeight(finalHeightDip);
 
+        if (_hasAppliedPosition &&
+            _lastOverlayLeftPx == desiredLeftPx &&
+            _lastOverlayTopPx == desiredTopPx &&
+            _lastOverlayWidthPx == desiredWidthPx &&
+            _lastOverlayHeightPx == finalHeightPx)
+        {
+            return;
+        }
+
+        _hasAppliedPosition = true;
+        _lastOverlayLeftPx = desiredLeftPx;
+        _lastOverlayTopPx = desiredTopPx;
+        _lastOverlayWidthPx = desiredWidthPx;
+        _lastOverlayHeightPx = finalHeightPx;
+
         var overlayHwnd = new WindowInteropHelper(this).Handle;
         if (overlayHwnd != IntPtr.Zero)
         {
@@ -822,7 +897,10 @@ public partial class OverlayWindow : Window
                 desiredTopPx,
                 desiredWidthPx,
                 finalHeightPx,
-                NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOZORDER);
+                NativeMethods.SWP_NOACTIVATE |
+                NativeMethods.SWP_NOZORDER |
+                NativeMethods.SWP_ASYNCWINDOWPOS |
+                NativeMethods.SWP_NOSENDCHANGING);
         }
         else
         {
@@ -873,7 +951,7 @@ public partial class OverlayWindow : Window
              !string.Equals(previousText, ResultSummaryText.Text, StringComparison.Ordinal)) &&
             ResultHost.Visibility == Visibility.Visible)
         {
-            PositionToDialog();
+            RequestPositionUpdate();
         }
     }
 

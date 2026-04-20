@@ -8,8 +8,10 @@ namespace SuperSelect.App.Services;
 internal sealed class EverythingService
 {
     private readonly object _syncRoot = new();
+    private static readonly TimeSpan AvailabilityProbeInterval = TimeSpan.FromMilliseconds(500);
     private bool _isAvailable = true;
     private string _lastErrorMessage = string.Empty;
+    private DateTime _lastAvailabilityProbeUtc = DateTime.MinValue;
     [ThreadStatic]
     private static StringBuilder? _threadPathBuilder;
 
@@ -376,6 +378,15 @@ internal sealed class EverythingService
             return false;
         }
 
+        var nowUtc = DateTime.UtcNow;
+        if (_lastAvailabilityProbeUtc != DateTime.MinValue &&
+            nowUtc - _lastAvailabilityProbeUtc < AvailabilityProbeInterval)
+        {
+            return true;
+        }
+
+        _lastAvailabilityProbeUtc = nowUtc;
+
         try
         {
             _ = Native.Everything_GetMajorVersion();
@@ -402,6 +413,7 @@ internal sealed class EverythingService
     {
         _isAvailable = false;
         _lastErrorMessage = message;
+        _lastAvailabilityProbeUtc = DateTime.MinValue;
     }
 
     private static uint ToEverythingSort(EverythingSortOption sortOption)
