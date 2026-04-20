@@ -48,6 +48,7 @@ public partial class OverlayWindow : Window
     private readonly DispatcherTimer _positionUpdateTimer;
     private readonly DispatcherTimer _dialogRectPollTimer;
     private readonly List<OptionItem<EverythingSortOption>> _sortOptions;
+    private readonly ContextMenu _sortContextMenu;
     private readonly SemaphoreSlim _automationOperationGate = new(1, 1);
 
     private CancellationTokenSource? _refreshCts;
@@ -73,11 +74,19 @@ public partial class OverlayWindow : Window
     private bool _allowClose;
     private bool _dropInteropConfigured;
     private bool _positionUpdateRequested;
+    private bool _positionRecomputeRequested;
     private bool _hasAppliedPosition;
     private int _lastOverlayLeftPx;
     private int _lastOverlayTopPx;
     private int _lastOverlayWidthPx;
     private int _lastOverlayHeightPx;
+    private IntPtr _overlayHwnd;
+    private bool _hasLastDialogWindowRect;
+    private NativeMethods.RECT _lastDialogWindowRect;
+    private bool _hasLastDialogVisualRect;
+    private NativeMethods.RECT _lastDialogVisualRect;
+    private Visibility _lastMeasuredStatusVisibility = Visibility.Collapsed;
+    private Visibility _lastMeasuredSummaryVisibility = Visibility.Collapsed;
 
     internal OverlayWindow(
         EverythingService everythingService,
@@ -102,6 +111,7 @@ public partial class OverlayWindow : Window
             new OptionItem<EverythingSortOption>("路径A-Z", EverythingSortOption.PathAsc),
             new OptionItem<EverythingSortOption>("路径Z-A", EverythingSortOption.PathDesc),
         ];
+        _sortContextMenu = CreateSortContextMenu();
 
         _searchDebounceTimer = new DispatcherTimer
         {
@@ -115,13 +125,14 @@ public partial class OverlayWindow : Window
             Interval = TimeSpan.FromMilliseconds(16)
         };
         _positionUpdateTimer.Tick += PositionUpdateTimer_OnTick;
-        _dialogRectPollTimer = new DispatcherTimer(DispatcherPriority.Send)
+        _dialogRectPollTimer = new DispatcherTimer(DispatcherPriority.Render)
         {
             Interval = TimeSpan.FromMilliseconds(16)
         };
         _dialogRectPollTimer.Tick += DialogRectPollTimer_OnTick;
 
         ResultList.ItemsSource = _items;
+        SortButton.ContextMenu = _sortContextMenu;
         ApplyModeUiState();
         UpdateSortButtonLabel();
 
@@ -149,6 +160,7 @@ public partial class OverlayWindow : Window
         }
 
         _positionUpdateRequested = true;
+        _positionRecomputeRequested = true;
         if (!_positionUpdateTimer.IsEnabled)
         {
             _positionUpdateTimer.Start();
@@ -163,7 +175,19 @@ public partial class OverlayWindow : Window
             return;
         }
 
-        PositionToDialog();
+        if (!NativeMethods.GetWindowRect(_dialogHwnd, out var dialogRect))
+        {
+            return;
+        }
+
+        if (!_positionRecomputeRequested &&
+            _hasLastDialogWindowRect &&
+            RectEquals(_lastDialogWindowRect, dialogRect))
+        {
+            return;
+        }
+
+        PositionToDialog(dialogRect);
     }
 
     public void AttachToDialog(IntPtr dialogHwnd)
@@ -210,14 +234,17 @@ public partial class OverlayWindow : Window
         }
 
         ApplyModeUiState();
-        var overlayHwnd = new WindowInteropHelper(this).EnsureHandle();
-        ConfigureDropInteropCompatibility(overlayHwnd);
-        NativeMethods.SetWindowLongPtrEx(overlayHwnd, NativeMethods.GWL_HWNDPARENT, _dialogHwnd);
+        _overlayHwnd = new WindowInteropHelper(this).EnsureHandle();
+        ConfigureDropInteropCompatibility(_overlayHwnd);
+        NativeMethods.SetWindowLongPtrEx(_overlayHwnd, NativeMethods.GWL_HWNDPARENT, _dialogHwnd);
         if (!IsVisible)
         {
             Show();
         }
 
+        _hasLastDialogWindowRect = false;
+        _hasLastDialogVisualRect = false;
+        _positionRecomputeRequested = true;
         _lastDialogSnapshotProbeUtc = DateTime.MinValue;
         _dialogMonitorTimer.Interval = DialogMonitorLivenessInterval;
         _dialogMonitorTimer.Start();
@@ -238,6 +265,7 @@ public partial class OverlayWindow : Window
         _dialogRectPollTimer.Stop();
         _positionUpdateTimer.Stop();
         _positionUpdateRequested = false;
+        _positionRecomputeRequested = false;
         Interlocked.Exchange(ref _dialogMonitorInFlight, 0);
         _lastDialogSnapshotProbeUtc = DateTime.MinValue;
         _lastFolderStateProbeUtc = DateTime.MinValue;
@@ -261,13 +289,14 @@ public partial class OverlayWindow : Window
         _lastOverlayTopPx = 0;
         _lastOverlayWidthPx = 0;
         _lastOverlayHeightPx = 0;
+        _hasLastDialogWindowRect = false;
+        _hasLastDialogVisualRect = false;
 
         if (IsVisible)
         {
-            var overlayHwnd = new WindowInteropHelper(this).Handle;
-            if (overlayHwnd != IntPtr.Zero)
+            if (_overlayHwnd != IntPtr.Zero)
             {
-                NativeMethods.SetWindowLongPtrEx(overlayHwnd, NativeMethods.GWL_HWNDPARENT, IntPtr.Zero);
+                NativeMethods.SetWindowLongPtrEx(_overlayHwnd, NativeMethods.GWL_HWNDPARENT, IntPtr.Zero);
             }
             Hide();
         }
@@ -280,7 +309,8 @@ public partial class OverlayWindow : Window
             return;
         }
 
-        RequestPositionUpdate();
+        _positionRecomputeRequested = true;
+        PositionToDialog();
     }
 
     public void Shutdown()
@@ -749,6 +779,7 @@ public partial class OverlayWindow : Window
     {
         var previousVisibility = ResultHost.Visibility;
         var previousHeight = Height;
+        var previousCount = _items.Count;
         var changed = !AreItemsEquivalent(items);
 
         if (changed)
@@ -786,30 +817,38 @@ public partial class OverlayWindow : Window
         }
 
         ResultHost.Visibility = _items.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-        var statusVisible = StatusText.Visibility == Visibility.Visible;
-        
-        // Let WPF measure the true dynamic height
-        this.SizeToContent = SizeToContent.Height;
-        this.UpdateLayout();
-        
-        var desiredHeight = this.ActualHeight;
-        // Enforce maximum height (XAML MaxHeight handles the bounds perfectly)
-        this.SizeToContent = SizeToContent.Manual;
-        if (desiredHeight > ExpandedHeightDip)
+        var shouldRecalculateHeight =
+            previousVisibility != ResultHost.Visibility ||
+            previousCount != _items.Count ||
+            _lastMeasuredStatusVisibility != StatusText.Visibility ||
+            _lastMeasuredSummaryVisibility != ResultSummaryText.Visibility;
+
+        if (shouldRecalculateHeight)
         {
-            this.Height = ExpandedHeightDip;
-        }
-        else
-        {
-            this.Height = desiredHeight;
+            RecalculateWindowHeight();
         }
 
         if (changed ||
             previousVisibility != ResultHost.Visibility ||
-            Math.Abs(previousHeight - Height) > 0.5)
+            (shouldRecalculateHeight && Math.Abs(previousHeight - Height) > 0.5))
         {
             RequestPositionUpdate();
         }
+    }
+
+    private void RecalculateWindowHeight()
+    {
+        SizeToContent = SizeToContent.Height;
+        UpdateLayout();
+
+        var desiredHeight = ActualHeight;
+        SizeToContent = SizeToContent.Manual;
+        Height = desiredHeight > ExpandedHeightDip
+            ? ExpandedHeightDip
+            : desiredHeight;
+
+        _lastMeasuredStatusVisibility = StatusText.Visibility;
+        _lastMeasuredSummaryVisibility = ResultSummaryText.Visibility;
     }
 
     private void PositionToDialog()
@@ -819,18 +858,42 @@ public partial class OverlayWindow : Window
             return;
         }
 
-        // Win10/11 file dialogs include an invisible resize border in GetWindowRect.
-        // Use the visual frame bounds when available to remove the alignment gap.
-        if (NativeMethods.DwmGetWindowAttribute(
-                _dialogHwnd,
-                NativeMethods.DWMWA_EXTENDED_FRAME_BOUNDS,
-                out var extRect,
-                Marshal.SizeOf(typeof(NativeMethods.RECT))) == 0 &&
-            extRect.Width > 0 &&
-            extRect.Height > 0)
+        PositionToDialog(rect);
+    }
+
+    private void PositionToDialog(NativeMethods.RECT windowRect)
+    {
+        var windowRectChanged = !_hasLastDialogWindowRect || !RectEquals(_lastDialogWindowRect, windowRect);
+        _lastDialogWindowRect = windowRect;
+        _hasLastDialogWindowRect = true;
+
+        NativeMethods.RECT rect;
+        if (windowRectChanged || !_hasLastDialogVisualRect)
         {
-            rect = extRect;
+            rect = windowRect;
+
+            // Win10/11 file dialogs include an invisible resize border in GetWindowRect.
+            // Use the visual frame bounds when available to remove the alignment gap.
+            if (NativeMethods.DwmGetWindowAttribute(
+                    _dialogHwnd,
+                    NativeMethods.DWMWA_EXTENDED_FRAME_BOUNDS,
+                    out var extRect,
+                    Marshal.SizeOf(typeof(NativeMethods.RECT))) == 0 &&
+                extRect.Width > 0 &&
+                extRect.Height > 0)
+            {
+                rect = extRect;
+            }
+
+            _lastDialogVisualRect = rect;
+            _hasLastDialogVisualRect = true;
         }
+        else
+        {
+            rect = _lastDialogVisualRect;
+        }
+
+        _positionRecomputeRequested = false;
 
         var dpi = NativeMethods.GetDpiForWindow(_dialogHwnd);
         if (dpi == 0)
@@ -887,7 +950,9 @@ public partial class OverlayWindow : Window
         _lastOverlayWidthPx = desiredWidthPx;
         _lastOverlayHeightPx = finalHeightPx;
 
-        var overlayHwnd = new WindowInteropHelper(this).Handle;
+        var overlayHwnd = _overlayHwnd != IntPtr.Zero
+            ? _overlayHwnd
+            : new WindowInteropHelper(this).Handle;
         if (overlayHwnd != IntPtr.Zero)
         {
             _ = NativeMethods.SetWindowPos(
@@ -899,7 +964,6 @@ public partial class OverlayWindow : Window
                 finalHeightPx,
                 NativeMethods.SWP_NOACTIVATE |
                 NativeMethods.SWP_NOZORDER |
-                NativeMethods.SWP_ASYNCWINDOWPOS |
                 NativeMethods.SWP_NOSENDCHANGING);
         }
         else
@@ -909,6 +973,14 @@ public partial class OverlayWindow : Window
             Left = PxToDip(desiredLeftPx, scale);
             Top = PxToDip(desiredTopPx, scale);
         }
+    }
+
+    private static bool RectEquals(NativeMethods.RECT left, NativeMethods.RECT right)
+    {
+        return left.Left == right.Left &&
+               left.Top == right.Top &&
+               left.Right == right.Right &&
+               left.Bottom == right.Bottom;
     }
 
     private void UpdateResultHostHeight(double windowHeightDip)
@@ -1368,33 +1440,10 @@ public partial class OverlayWindow : Window
 
     private void SortButton_OnClick(object sender, RoutedEventArgs e)
     {
-        var contextMenu = new ContextMenu();
-        for (int i = 0; i < _sortOptions.Count; i++)
-        {
-            var option = _sortOptions[i];
-            var item = new MenuItem
-            {
-                Header = option.Label,
-                IsChecked = _sortIndex == i,
-                Tag = i
-            };
-            item.Click += (s, args) =>
-            {
-                _sortIndex = (int)((MenuItem)s).Tag;
-                UpdateSortButtonLabel();
-                if (_currentMode is OverlayMode.Search or OverlayMode.Recent)
-                {
-                    _searchDebounceTimer.Stop();
-                    RequestCandidatesRefresh(immediate: true);
-                }
-            };
-            contextMenu.Items.Add(item);
-        }
-        
-        contextMenu.PlacementTarget = SortButton;
-        contextMenu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
-        SortButton.ContextMenu = contextMenu;
-        SortButton.ContextMenu.IsOpen = true;
+        SyncSortMenuSelectionState();
+        _sortContextMenu.PlacementTarget = SortButton;
+        _sortContextMenu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+        _sortContextMenu.IsOpen = true;
     }
 
     private void SwitchMode(OverlayMode mode)
@@ -1438,6 +1487,52 @@ public partial class OverlayWindow : Window
     {
         // SortLabelText.Text = _sortOptions[_sortIndex].Label;
         SortButton.ToolTip = $"点击切换搜索排序 ({_sortOptions[_sortIndex].Label})";
+    }
+
+    private ContextMenu CreateSortContextMenu()
+    {
+        var contextMenu = new ContextMenu();
+        for (var i = 0; i < _sortOptions.Count; i++)
+        {
+            var option = _sortOptions[i];
+            var item = new MenuItem
+            {
+                Header = option.Label,
+                Tag = i,
+            };
+            item.Click += SortMenuItem_OnClick;
+            contextMenu.Items.Add(item);
+        }
+
+        return contextMenu;
+    }
+
+    private void SortMenuItem_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { Tag: int index } || _sortIndex == index)
+        {
+            return;
+        }
+
+        _sortIndex = index;
+        UpdateSortButtonLabel();
+
+        if (_currentMode is OverlayMode.Search or OverlayMode.Recent)
+        {
+            _searchDebounceTimer.Stop();
+            RequestCandidatesRefresh(immediate: true);
+        }
+    }
+
+    private void SyncSortMenuSelectionState()
+    {
+        for (var i = 0; i < _sortContextMenu.Items.Count; i++)
+        {
+            if (_sortContextMenu.Items[i] is MenuItem item)
+            {
+                item.IsChecked = i == _sortIndex;
+            }
+        }
     }
 
     private void TypeFilterButton_OnClick(object sender, RoutedEventArgs e)
@@ -1486,7 +1581,7 @@ public partial class OverlayWindow : Window
 
     private void Window_OnPreviewDrop(object sender, System.Windows.DragEventArgs e)
     {
-        var paths = ExtractDroppedPaths(e.Data);
+        var paths = DropPathExtractor.ExtractDroppedPaths(e.Data);
         if (paths.Count == 0)
         {
             SetStatus("未识别到可加入托盘的文件。");
@@ -1571,116 +1666,10 @@ public partial class OverlayWindow : Window
 
     private void Window_OnPreviewDragOver(object sender, System.Windows.DragEventArgs e)
     {
-        e.Effects = HasDroppedFiles(e.Data)
+        e.Effects = DropPathExtractor.HasDroppedFiles(e.Data)
             ? System.Windows.DragDropEffects.Copy
             : System.Windows.DragDropEffects.None;
         e.Handled = true;
-    }
-
-    private static bool HasDroppedFiles(System.Windows.IDataObject data)
-    {
-        foreach (var format in data.GetFormats())
-        {
-            try
-            {
-                if (ExtractDroppedPathsFromRawData(data.GetData(format)).Count > 0)
-                {
-                    return true;
-                }
-            }
-            catch
-            {
-                // Ignore unreadable format payload.
-            }
-        }
-
-        return false;
-    }
-
-    private static IReadOnlyList<string> ExtractDroppedPaths(System.Windows.IDataObject data)
-    {
-        foreach (var format in new[] { System.Windows.DataFormats.FileDrop, "FileNameW", "FileName" })
-        {
-            if (!data.GetDataPresent(format))
-            {
-                continue;
-            }
-
-            IReadOnlyList<string> paths;
-            try
-            {
-                paths = ExtractDroppedPathsFromRawData(data.GetData(format));
-            }
-            catch
-            {
-                continue;
-            }
-
-            if (paths.Count > 0)
-            {
-                return paths;
-            }
-        }
-
-        foreach (var format in data.GetFormats())
-        {
-            IReadOnlyList<string> paths;
-            try
-            {
-                paths = ExtractDroppedPathsFromRawData(data.GetData(format));
-            }
-            catch
-            {
-                continue;
-            }
-
-            if (paths.Count > 0)
-            {
-                return paths;
-            }
-        }
-
-        return [];
-    }
-
-    private static IReadOnlyList<string> ExtractDroppedPathsFromRawData(object? raw)
-    {
-        if (raw is null)
-        {
-            return [];
-        }
-
-        if (raw is string single)
-        {
-            return string.IsNullOrWhiteSpace(single) ? [] : [single];
-        }
-
-        if (raw is string[] paths)
-        {
-            return paths
-                .Where(path => !string.IsNullOrWhiteSpace(path))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-        }
-
-        if (raw is System.Collections.Specialized.StringCollection collection && collection.Count > 0)
-        {
-            return collection
-                .Cast<string>()
-                .Where(path => !string.IsNullOrWhiteSpace(path))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-        }
-
-        if (raw is IEnumerable<string> enumerable)
-        {
-            return enumerable
-                .Where(path => !string.IsNullOrWhiteSpace(path))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-        }
-
-        return [];
     }
 
     private static int DipToPx(double dip, double scale)

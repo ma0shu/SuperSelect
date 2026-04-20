@@ -12,41 +12,16 @@ internal sealed class WinEventFileDialogWatcher : IDisposable
     private IntPtr _objectShowHook;
     private IntPtr _locationHook;
     private IntPtr _activeDialog;
-    private readonly DispatcherTimer _locationMoveTimer;
-    private int _locationMovePending;
     private readonly DispatcherTimer _teardownTimer;
 
     public WinEventFileDialogWatcher(Dispatcher dispatcher)
     {
         _dispatcher = dispatcher;
-        _locationMoveTimer = new DispatcherTimer(DispatcherPriority.Send)
-        {
-            Interval = TimeSpan.FromMilliseconds(16)
-        };
-        _locationMoveTimer.Tick += OnLocationMoveTimerTick;
         _teardownTimer = new DispatcherTimer(DispatcherPriority.Send)
         {
             Interval = TimeSpan.FromMilliseconds(32) // 32ms约等于30FPS，对人眼依然是瞬间，但大幅减少线程唤醒
         };
         _teardownTimer.Tick += OnTeardownTimerTick;
-    }
-
-    private void OnLocationMoveTimerTick(object? sender, EventArgs e)
-    {
-        if (_activeDialog == IntPtr.Zero || !NativeMethods.IsWindow(_activeDialog))
-        {
-            _locationMoveTimer.Stop();
-            Interlocked.Exchange(ref _locationMovePending, 0);
-            return;
-        }
-
-        if (Interlocked.Exchange(ref _locationMovePending, 0) == 0)
-        {
-            _locationMoveTimer.Stop();
-            return;
-        }
-
-        ActiveDialogMoved?.Invoke(_activeDialog);
     }
 
     private void OnTeardownTimerTick(object? sender, EventArgs e)
@@ -152,9 +127,7 @@ internal sealed class WinEventFileDialogWatcher : IDisposable
         }
 
         _teardownTimer.Stop();
-        _locationMoveTimer.Stop();
         _activeDialog = IntPtr.Zero;
-        Interlocked.Exchange(ref _locationMovePending, 0);
     }
 
     public void Dispose()
@@ -181,11 +154,17 @@ internal sealed class WinEventFileDialogWatcher : IDisposable
         {
             if (_activeDialog != IntPtr.Zero && hwnd == _activeDialog)
             {
-                Interlocked.Exchange(ref _locationMovePending, 1);
-                if (!_locationMoveTimer.IsEnabled)
-                {
-                    _locationMoveTimer.Start();
-                }
+                _ = _dispatcher.BeginInvoke(
+                    DispatcherPriority.Send,
+                    new Action(() =>
+                    {
+                        if (_activeDialog != IntPtr.Zero &&
+                            hwnd == _activeDialog &&
+                            NativeMethods.IsWindow(_activeDialog))
+                        {
+                            ActiveDialogMoved?.Invoke(_activeDialog);
+                        }
+                    }));
             }
             return;
         }
@@ -201,20 +180,6 @@ internal sealed class WinEventFileDialogWatcher : IDisposable
 
     private void EvaluateActiveDialog(uint eventType, IntPtr sourceHwnd)
     {
-        if (eventType == NativeMethods.EVENT_OBJECT_LOCATIONCHANGE &&
-            _activeDialog != IntPtr.Zero &&
-            sourceHwnd == _activeDialog &&
-            NativeMethods.IsWindow(_activeDialog))
-        {
-            ActiveDialogMoved?.Invoke(_activeDialog);
-            return;
-        }
-
-        if (eventType == NativeMethods.EVENT_OBJECT_LOCATIONCHANGE)
-        {
-            return;
-        }
-
         if (_activeDialog != IntPtr.Zero && !NativeMethods.IsWindow(_activeDialog))
         {
             _teardownTimer.Stop();
