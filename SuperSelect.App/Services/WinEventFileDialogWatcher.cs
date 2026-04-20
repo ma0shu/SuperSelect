@@ -12,10 +12,29 @@ internal sealed class WinEventFileDialogWatcher : IDisposable
     private IntPtr _objectShowHook;
     private IntPtr _locationHook;
     private IntPtr _activeDialog;
+    private readonly DispatcherTimer _teardownTimer;
 
     public WinEventFileDialogWatcher(Dispatcher dispatcher)
     {
         _dispatcher = dispatcher;
+        _teardownTimer = new DispatcherTimer(DispatcherPriority.Send)
+        {
+            Interval = TimeSpan.FromMilliseconds(32) // 32ms约等于30FPS，对人眼依然是瞬间，但大幅减少线程唤醒
+        };
+        _teardownTimer.Tick += OnTeardownTimerTick;
+    }
+
+    private void OnTeardownTimerTick(object? sender, EventArgs e)
+    {
+        if (_activeDialog != IntPtr.Zero)
+        {
+            if (!NativeMethods.IsWindow(_activeDialog) || !NativeMethods.IsWindowVisible(_activeDialog))
+            {
+                _teardownTimer.Stop();
+                _activeDialog = IntPtr.Zero;
+                ActiveDialogChanged?.Invoke(null);
+            }
+        }
     }
 
     public event Action<IntPtr?>? ActiveDialogChanged;
@@ -107,6 +126,7 @@ internal sealed class WinEventFileDialogWatcher : IDisposable
             _locationHook = IntPtr.Zero;
         }
 
+        _teardownTimer.Stop();
         _activeDialog = IntPtr.Zero;
     }
 
@@ -141,8 +161,12 @@ internal sealed class WinEventFileDialogWatcher : IDisposable
             return;
         }
 
+        var priority = eventType == NativeMethods.EVENT_SYSTEM_DIALOGEND
+            ? DispatcherPriority.Send
+            : DispatcherPriority.Input;
+
         _ = _dispatcher.BeginInvoke(
-            DispatcherPriority.Input,
+            priority,
             new Action(() => EvaluateActiveDialog(eventType, hwnd)));
     }
 
@@ -164,12 +188,14 @@ internal sealed class WinEventFileDialogWatcher : IDisposable
 
         if (_activeDialog != IntPtr.Zero && !NativeMethods.IsWindow(_activeDialog))
         {
+            _teardownTimer.Stop();
             _activeDialog = IntPtr.Zero;
             ActiveDialogChanged?.Invoke(null);
         }
 
         if (_activeDialog != IntPtr.Zero && !NativeMethods.IsWindowVisible(_activeDialog))
         {
+            _teardownTimer.Stop();
             _activeDialog = IntPtr.Zero;
             ActiveDialogChanged?.Invoke(null);
         }
@@ -178,6 +204,7 @@ internal sealed class WinEventFileDialogWatcher : IDisposable
             _activeDialog != IntPtr.Zero &&
             sourceHwnd == _activeDialog)
         {
+            _teardownTimer.Stop();
             _activeDialog = IntPtr.Zero;
             ActiveDialogChanged?.Invoke(null);
             return;
@@ -194,6 +221,7 @@ internal sealed class WinEventFileDialogWatcher : IDisposable
 
             if (_activeDialog != IntPtr.Zero)
             {
+                _teardownTimer.Stop();
                 _activeDialog = IntPtr.Zero;
                 ActiveDialogChanged?.Invoke(null);
             }
@@ -207,6 +235,10 @@ internal sealed class WinEventFileDialogWatcher : IDisposable
         }
 
         _activeDialog = candidate;
+        if (candidate != IntPtr.Zero && !_teardownTimer.IsEnabled)
+        {
+            _teardownTimer.Start();
+        }
         ActiveDialogChanged?.Invoke(candidate);
     }
 

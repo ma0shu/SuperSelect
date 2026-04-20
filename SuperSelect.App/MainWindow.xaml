@@ -32,42 +32,88 @@
                    Text="非管理员权限运行中，无法注入管理员权限进程（如应用安装程序）" />
 
         <TextBlock Grid.Row="1"
-                   Margin="0,28,0,12"
+                   Margin="0,16,0,12"
                    TextWrapping="Wrap"
-                   Text="运行后会监听系统文件对话框，并在对话框下方弹出一行快速面板。面板支持 Everything 搜索、最近文件、托盘文件和资源管理器路径跳转。全局快捷键 Ctrl+Shift+Z 可在任意位置唤起本窗口。" />
+                   FontSize="12"
+                   Foreground="#64748B"
+                   Text="运行后会监听系统文件对话框，并在对话框下方弹出一行快速面板。全局快捷键 Ctrl+Shift+Z 可唤起本窗口。" />
 
-        <GroupBox Grid.Row="2"
-                  Header="文件托盘"
-                  AllowDrop="True"
-                  PreviewDragOver="TrayDropHost_OnPreviewDragOver"
-                  PreviewDrop="TrayDropHost_OnPreviewDrop">
-            <DockPanel Margin="8">
-                <StackPanel DockPanel.Dock="Bottom"
-                            Orientation="Horizontal"
-                            HorizontalAlignment="Right"
-                            Margin="0,10,0,0">
-                    <CheckBox Width="196"
-                              Margin="0,0,8,0"
+        <Grid Grid.Row="2"
+              AllowDrop="True"
+              PreviewDragOver="TrayDropHost_OnPreviewDragOver"
+              PreviewDrop="TrayDropHost_OnPreviewDrop">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <Grid Grid.Row="0" Margin="0,0,0,8">
+                <TextBlock Text="文件托盘" FontWeight="SemiBold" VerticalAlignment="Center" Foreground="#334155" />
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                    <CheckBox Margin="0,0,12,0"
                               VerticalAlignment="Center"
                               Checked="AdminStartupCheckBox_OnChecked"
                               Unchecked="AdminStartupCheckBox_OnUnchecked"
                               x:Name="AdminStartupCheckBox"
-                              Content="开机自启并提权（免弹窗）" />
-                    <Button Width="96"
-                            Margin="0,0,8,0"
-                            Click="RefreshButton_OnClick">刷新</Button>
-                    <Button Width="96"
-                            Margin="0,0,8,0"
-                            Click="RemoveButton_OnClick">移除选中</Button>
-                    <Button Width="96"
-                            Click="ClearButton_OnClick">清空托盘</Button>
+                              FontSize="12"
+                              Foreground="#64748B"
+                              Content="开机自启并提权" />
+                    <Button Width="64" Height="24" Margin="0,0,8,0" Click="RefreshButton_OnClick" Background="Transparent" BorderThickness="0" Foreground="#2563EB" Cursor="Hand">刷新</Button>
+                    <Button Width="64" Height="24" Margin="0,0,8,0" Click="RemoveButton_OnClick" Background="Transparent" BorderThickness="0" Foreground="#2563EB" Cursor="Hand">移除</Button>
+                    <Button Width="64" Height="24" Click="ClearButton_OnClick" Background="Transparent" BorderThickness="0" Foreground="#EF4444" Cursor="Hand">清空</Button>
                 </StackPanel>
+            </Grid>
+
+            <Border Grid.Row="1"
+                    CornerRadius="4"
+                    BorderBrush="#E2E8F0"
+                    BorderThickness="1"
+                    Background="#FFFFFF">
                 <ListBox x:Name="TrayList"
                          AllowDrop="True"
+                         BorderThickness="0"
+                         Background="Transparent"
                          PreviewDragOver="TrayDropHost_OnPreviewDragOver"
-                         PreviewDrop="TrayDropHost_OnPreviewDrop" />
-            </DockPanel>
-        </GroupBox>
+                         PreviewDrop="TrayDropHost_OnPreviewDrop">
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem">
+                            <Setter Property="Background" Value="Transparent" />
+                            <Setter Property="BorderThickness" Value="0" />
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                            <Setter Property="Padding" Value="6,4"/>
+                            <Style.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter Property="Background" Value="#F8FAFC" />
+                                </Trigger>
+                                <Trigger Property="IsSelected" Value="True">
+                                    <Setter Property="Background" Value="#EFF6FF" />
+                                </Trigger>
+                            </Style.Triggers>
+                        </Style>
+                    </ListBox.ItemContainerStyle>
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="20" />
+                                    <ColumnDefinition Width="4.5*" />
+                                    <ColumnDefinition Width="3*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" x:Name="IconText" FontFamily="Segoe Fluent Icons" Text="&#xE7C3;" Foreground="#94A3B8" FontSize="14" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1" Text="{Binding DisplayName}" FontSize="12" Foreground="#1E293B" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,0,12,0" />
+                                <TextBlock Grid.Column="2" Text="{Binding SecondaryText}" FontSize="11" Foreground="#94A3B8" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                            </Grid>
+                            <DataTemplate.Triggers>
+                                <DataTrigger Binding="{Binding IsDirectory}" Value="True">
+                                    <Setter TargetName="IconText" Property="Text" Value="&#xE8D5;" />
+                                    <Setter TargetName="IconText" Property="Foreground" Value="#FCD34D" />
+                                </DataTrigger>
+                            </DataTemplate.Triggers>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </Border>
+        </Grid>
 
         <TextBlock Grid.Row="3"
                    Margin="0,10,0,0"

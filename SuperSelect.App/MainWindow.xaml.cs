@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.Linq;
 using System.Windows;
+using SuperSelect.App.Models;
 using SuperSelect.App.Services;
 
 namespace SuperSelect.App;
@@ -11,7 +12,7 @@ public partial class MainWindow : Window
     private readonly WinEventFileDialogWatcher _watcher;
     private readonly EverythingService _everythingService;
     private readonly TrayRepository _trayRepository;
-    private readonly ObservableCollection<string> _trayItems = [];
+    private readonly ObservableCollection<FileCandidate> _trayItems = [];
     private bool _isUpdatingAdminStartupUi;
 
     internal MainWindow(
@@ -127,7 +128,7 @@ public partial class MainWindow : Window
         _trayItems.Clear();
         foreach (var candidate in _trayRepository.Query(string.Empty))
         {
-            _trayItems.Add(candidate.FullPath);
+            _trayItems.Add(candidate);
         }
     }
 
@@ -138,12 +139,12 @@ public partial class MainWindow : Window
 
     private void RemoveButton_OnClick(object sender, RoutedEventArgs e)
     {
-        if (TrayList.SelectedItem is not string path)
+        if (TrayList.SelectedItem is not FileCandidate candidate)
         {
             return;
         }
 
-        _trayRepository.Remove(path);
+        _trayRepository.Remove(candidate.FullPath);
         RefreshTrayList();
     }
 

@@ -8,18 +8,161 @@ namespace SuperSelect.App.Services;
 
 internal sealed class ExplorerWindowService
 {
+    private static readonly TimeSpan SnapshotTtl = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan EmptySnapshotNegativeTtl = TimeSpan.FromSeconds(2);
+
+    private readonly object _snapshotSync = new();
+    private IReadOnlyList<FileCandidate> _cachedSnapshot = [];
+    private DateTime _lastSnapshotUtc = DateTime.MinValue;
+    private DateTime _emptySnapshotValidUntilUtc = DateTime.MinValue;
+    private int _refreshInFlight;
+
+    public ExplorerWindowService()
+    {
+        EnsureSnapshotFreshAsync(force: true);
+    }
+
     public IReadOnlyList<FileCandidate> GetOpenLocations(string keyword)
     {
         var filter = keyword.Trim();
+        var nowUtc = DateTime.UtcNow;
+
+        IReadOnlyList<FileCandidate>? snapshotToUse = null;
+        var skipRefreshForNegativeCache = false;
+
+        lock (_snapshotSync)
+        {
+            if (nowUtc - _lastSnapshotUtc <= SnapshotTtl)
+            {
+                snapshotToUse = _cachedSnapshot;
+            }
+            else if (_cachedSnapshot.Count == 0 && nowUtc <= _emptySnapshotValidUntilUtc)
+            {
+                snapshotToUse = _cachedSnapshot;
+                skipRefreshForNegativeCache = true;
+            }
+        }
+
+        if (snapshotToUse is not null)
+        {
+            if (!skipRefreshForNegativeCache)
+            {
+                EnsureSnapshotFreshAsync(force: false);
+            }
+
+            return FilterSnapshot(snapshotToUse, filter);
+        }
+
+        var refreshed = RefreshSnapshotNow();
+        return FilterSnapshot(refreshed, filter);
+    }
+
+    public IReadOnlyList<FileCandidate> GetOpenLocationsCached(string keyword)
+    {
+        EnsureSnapshotFreshAsync(force: false);
+
+        IReadOnlyList<FileCandidate> snapshot;
+        lock (_snapshotSync)
+        {
+            snapshot = _cachedSnapshot;
+        }
+
+        return FilterSnapshot(snapshot, keyword.Trim());
+    }
+
+    public bool HasOpenLocationsCached()
+    {
+        EnsureSnapshotFreshAsync(force: false);
+
+        lock (_snapshotSync)
+        {
+            return _cachedSnapshot.Count > 0;
+        }
+    }
+
+    public void EnsureSnapshotFreshAsync(bool force = false)
+    {
+        var nowUtc = DateTime.UtcNow;
+        bool shouldRefresh;
+
+        lock (_snapshotSync)
+        {
+            shouldRefresh = force || nowUtc - _lastSnapshotUtc > SnapshotTtl;
+            if (!force && _cachedSnapshot.Count == 0 && nowUtc <= _emptySnapshotValidUntilUtc)
+            {
+                shouldRefresh = false;
+            }
+        }
+
+        if (!shouldRefresh)
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref _refreshInFlight, 1, 0) != 0)
+        {
+            return;
+        }
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                _ = RefreshSnapshotNow();
+            }
+            catch
+            {
+                // Keep stale snapshot on refresh errors.
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _refreshInFlight, 0);
+            }
+        });
+    }
+
+    private IReadOnlyList<FileCandidate> RefreshSnapshotNow()
+    {
+        var discovered = DiscoverOpenLocations();
+        var nowUtc = DateTime.UtcNow;
+
+        lock (_snapshotSync)
+        {
+            _cachedSnapshot = discovered;
+            _lastSnapshotUtc = nowUtc;
+            _emptySnapshotValidUntilUtc = discovered.Count == 0
+                ? nowUtc + EmptySnapshotNegativeTtl
+                : DateTime.MinValue;
+
+            return _cachedSnapshot;
+        }
+    }
+
+    private static IReadOnlyList<FileCandidate> DiscoverOpenLocations()
+    {
         var result = new List<FileCandidate>();
 
-        result.AddRange(GetLocationsFromShellWindows(filter));
+        result.AddRange(GetLocationsFromShellWindows(string.Empty));
         if (result.Count == 0)
         {
-            result.AddRange(GetLocationsFromWindowAutomation(filter));
+            result.AddRange(GetLocationsFromWindowAutomation(string.Empty));
         }
 
         return DeduplicatePreservingOrder(result);
+    }
+
+    private static IReadOnlyList<FileCandidate> FilterSnapshot(
+        IReadOnlyList<FileCandidate> snapshot,
+        string filter)
+    {
+        if (snapshot.Count == 0 || string.IsNullOrWhiteSpace(filter))
+        {
+            return snapshot;
+        }
+
+        return snapshot
+            .Where(candidate => MatchesFilter(candidate.FullPath, filter))
+            .ToList();
     }
 
     private static IEnumerable<FileCandidate> GetLocationsFromShellWindows(string filter)

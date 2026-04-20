@@ -130,6 +130,8 @@ internal sealed class FileDialogAutomationController
         if (string.IsNullOrWhiteSpace(directory) || string.IsNullOrWhiteSpace(fileName))
             return false;
 
+        directory = NormalizeDirectoryPath(directory);
+
         var edit = GetFileNameEdit();
         var confirm = GetConfirmButton();
         if (edit == IntPtr.Zero || confirm == IntPtr.Zero)
@@ -143,7 +145,20 @@ internal sealed class FileDialogAutomationController
         if (!TrySetText(edit, directory)) return false;
         if (!TryInvoke(confirm)) return false;
 
-        try { await Task.Delay(40, cancellationToken).ConfigureAwait(false); } catch { return false; }
+        var sb = new System.Text.StringBuilder(512);
+        for (int i = 0; i < 15; i++)
+        {
+            try { await Task.Delay(80, cancellationToken).ConfigureAwait(false); } catch { return false; }
+            var currentEdit = GetFileNameEdit();
+            if (currentEdit == IntPtr.Zero) break;
+            
+            sb.Clear();
+            NativeMethods.GetWindowText(currentEdit, sb, sb.Capacity);
+            if (sb.ToString() != directory)
+            {
+                break;
+            }
+        }
 
         edit = GetFileNameEdit();
         if (edit == IntPtr.Zero) return false;
@@ -238,6 +253,8 @@ internal sealed class FileDialogAutomationController
     public bool TryNavigateToDirectory(string directoryPath)
     {
         if (string.IsNullOrWhiteSpace(directoryPath)) return false;
+
+        directoryPath = NormalizeDirectoryPath(directoryPath);
 
         var edit = GetFileNameEdit();
         var confirm = GetConfirmButton();
@@ -576,7 +593,13 @@ internal sealed class FileDialogAutomationController
 
     private static string NormalizeDirectoryPath(string directoryPath)
     {
-        try { return Path.GetFullPath(directoryPath); }
+        try 
+        { 
+            var path = Path.GetFullPath(directoryPath); 
+            if (!path.EndsWith(Path.DirectorySeparatorChar.ToString()) && !path.EndsWith(Path.AltDirectorySeparatorChar.ToString()))
+                path += Path.DirectorySeparatorChar;
+            return path;
+        }
         catch { return directoryPath; }
     }
 

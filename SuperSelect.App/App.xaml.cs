@@ -24,11 +24,13 @@ public partial class App : System.Windows.Application
     private UserPreferencesRepository? _preferencesRepository;
     private DateTime _lastMemoryTrimUtc = DateTime.MinValue;
     private static readonly TimeSpan MemoryTrimCooldown = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan MemoryTrimStartDelay = TimeSpan.FromMilliseconds(1000);
     private const long MemoryTrimManagedThresholdBytes = 64L * 1024 * 1024;
+    private const string DialogDetachedTrimReason = "DialogDetached";
     private const int MainWindowHotkeyId = 0x5353;
     private const uint MainWindowHotkeyModifiers = Native.NativeMethods.MOD_CONTROL | Native.NativeMethods.MOD_SHIFT;
-    private const uint MainWindowHotkeyVKey = (uint)'Z';
-    private const string MainWindowHotkeyDisplayName = "Ctrl+Shift+Z";
+    private const uint MainWindowHotkeyVKey = (uint)'M';
+    private const string MainWindowHotkeyDisplayName = "Ctrl+Shift+M";
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -330,9 +332,16 @@ public partial class App : System.Windows.Application
     {
         try
         {
+            // Let the detach/hide rendering complete before any global GC pause.
+            Task.Delay(MemoryTrimStartDelay).GetAwaiter().GetResult();
+
             GC.Collect(GC.MaxGeneration, GCCollectionMode.Optimized, blocking: false, compacting: false);
 
-            _ = Native.NativeMethods.EmptyWorkingSet(Native.NativeMethods.GetCurrentProcess());
+            if (!string.Equals(reason, DialogDetachedTrimReason, StringComparison.Ordinal))
+            {
+                _ = Native.NativeMethods.EmptyWorkingSet(Native.NativeMethods.GetCurrentProcess());
+            }
+
             AppLogger.LogInfo($"Background memory trim executed: {reason}");
         }
         catch (Exception ex)

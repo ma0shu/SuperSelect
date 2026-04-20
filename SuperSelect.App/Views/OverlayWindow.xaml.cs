@@ -18,11 +18,11 @@ public partial class OverlayWindow : Window
 {
     private sealed record OptionItem<T>(string Label, T Value);
 
-    private const double UltraCompactHeightDip = 66.0;
-    private const double CompactHeightDip = 96.0;
-    private const double ExpandedHeightDip = 350.0;
-    private const double MinUsableHeightDip = 66.0;
-    private const double HeaderAndStatusHeightDip = 96.0;
+    private const double UltraCompactHeightDip = 48.0;
+    private const double CompactHeightDip = 76.0;
+    private const double ExpandedHeightDip = 216.0;
+    private const double MinUsableHeightDip = 48.0;
+    private const double HeaderAndStatusHeightDip = 72.0;
     private const double ResultSummaryHeightDip = 14.0;
     private const int OverlayGapPx = 0;
     private const int InitialQueryResultLimit = 320;
@@ -31,9 +31,11 @@ public partial class OverlayWindow : Window
     private const int DisplayResultLimit = 400;
     private const int TypeFilterScanPageSize = 2000;
     private const int AutomationActionTimeoutMs = 900;
+    private static readonly TimeSpan DialogMonitorLivenessInterval = TimeSpan.FromMilliseconds(140);
     private static readonly TimeSpan DialogMonitorBusyInterval = TimeSpan.FromMilliseconds(380);
     private static readonly TimeSpan DialogMonitorIdleInterval = TimeSpan.FromMilliseconds(760);
     private static readonly TimeSpan DialogMonitorTimeout = TimeSpan.FromMilliseconds(260);
+    private static readonly TimeSpan FolderStateProbeInterval = TimeSpan.FromMilliseconds(1200);
 
     private readonly EverythingService _everythingService;
     private readonly TrayRepository _trayRepository;
@@ -57,7 +59,14 @@ public partial class OverlayWindow : Window
     private bool _isFolderDialog;
     private string _lastFileTypeFilterText = string.Empty;
     private int _dialogMonitorInFlight;
+    private DateTime _lastDialogSnapshotProbeUtc = DateTime.MinValue;
+    private DateTime _lastFolderStateProbeUtc = DateTime.MinValue;
     private long _singleSelectVersion;
+    private long _refreshRequestVersion;
+    private long _refreshProcessedVersion;
+    private int _refreshLoopInFlight;
+    private bool _refreshImmediateRequested;
+    private readonly object _refreshRequestSync = new();
     private bool _allowClose;
     private bool _dropInteropConfigured;
 
@@ -105,7 +114,9 @@ public partial class OverlayWindow : Window
         _dialogHwnd = dialogHwnd;
         _dialogController = new FileDialogAutomationController(dialogHwnd);
         Interlocked.Increment(ref _singleSelectVersion);
+        CancelAndDisposeRefreshCts();
         _searchDebounceTimer.Stop();
+        _explorerWindowService.EnsureSnapshotFreshAsync(force: false);
         ResetModeForDialog();
 
         var controller = _dialogController;
@@ -116,7 +127,9 @@ public partial class OverlayWindow : Window
                 var snapshot = CaptureDialogSnapshot(
                     controller,
                     includeFilterText: true,
-                    fallbackFilterText: string.Empty);
+                    fallbackFilterText: string.Empty,
+                    includeFolderState: true,
+                    fallbackFolderState: _isFolderDialog);
                 _ = Dispatcher.BeginInvoke(new Action(() =>
                 {
                     if (_dialogHwnd != dialogHwnd || _dialogController != controller)
@@ -126,8 +139,15 @@ public partial class OverlayWindow : Window
 
                     _isFolderDialog = snapshot.IsFolderDialog;
                     _lastFileTypeFilterText = snapshot.FilterText;
+                    _lastFolderStateProbeUtc = DateTime.UtcNow;
+                    if (_currentMode == OverlayMode.Search &&
+                        _explorerWindowService.HasOpenLocationsCached() &&
+                        string.IsNullOrWhiteSpace(SearchBox.Text))
+                    {
+                        _currentMode = OverlayMode.Explorer;
+                    }
                     ApplyModeUiState();
-                    _ = RefreshCandidatesAsync(immediate: true);
+                    RequestCandidatesRefresh(immediate: true);
                 }));
             });
         }
@@ -141,8 +161,11 @@ public partial class OverlayWindow : Window
             Show();
         }
 
+        _lastDialogSnapshotProbeUtc = DateTime.MinValue;
+        _dialogMonitorTimer.Interval = DialogMonitorLivenessInterval;
         _dialogMonitorTimer.Start();
         PositionToDialog();
+        RequestCandidatesRefresh(immediate: true);
     }
 
     public void DetachDialog()
@@ -152,10 +175,13 @@ public partial class OverlayWindow : Window
         _wheelDeltaAccumulator = 0;
         _dialogMonitorTimer.Stop();
         Interlocked.Exchange(ref _dialogMonitorInFlight, 0);
+        _lastDialogSnapshotProbeUtc = DateTime.MinValue;
+        _lastFolderStateProbeUtc = DateTime.MinValue;
         _isFolderDialog = false;
         _lastFileTypeFilterText = string.Empty;
         ApplyModeUiState();
         Interlocked.Increment(ref _singleSelectVersion);
+        lock (_refreshRequestSync) _refreshImmediateRequested = false;
 
         CancelAndDisposeRefreshCts();
         CancelAndDisposeSingleSelectCts();
@@ -208,7 +234,84 @@ public partial class OverlayWindow : Window
         DetachDialog();
     }
 
-    private async Task RefreshCandidatesAsync(bool immediate = false)
+    private void RequestCandidatesRefresh(bool immediate)
+    {
+        lock (_refreshRequestSync)
+        {
+            if (immediate)
+            {
+                _refreshImmediateRequested = true;
+            }
+        }
+
+        _ = Interlocked.Increment(ref _refreshRequestVersion);
+        CancelAndDisposeRefreshCts();
+
+        if (Interlocked.CompareExchange(ref _refreshLoopInFlight, 1, 0) != 0)
+        {
+            return;
+        }
+
+        _ = Dispatcher.BeginInvoke(
+            DispatcherPriority.Background,
+            new Action(() => _ = ProcessRefreshLoopAsync()));
+    }
+
+    private async Task ProcessRefreshLoopAsync()
+    {
+        try
+        {
+            while (true)
+            {
+                var latestVersion = Interlocked.Read(ref _refreshRequestVersion);
+                if (latestVersion <= Interlocked.Read(ref _refreshProcessedVersion))
+                {
+                    return;
+                }
+
+                var immediate = ConsumeRefreshImmediateFlag();
+                await RefreshCandidatesAsync(latestVersion, immediate);
+                _ = Interlocked.Exchange(ref _refreshProcessedVersion, latestVersion);
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogException(
+                "OverlayWindow.ProcessRefreshLoopAsync",
+                ex,
+                throttle: TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            _ = Interlocked.Exchange(ref _refreshLoopInFlight, 0);
+
+            if (Interlocked.Read(ref _refreshRequestVersion) > Interlocked.Read(ref _refreshProcessedVersion) &&
+                Interlocked.CompareExchange(ref _refreshLoopInFlight, 1, 0) == 0)
+            {
+                _ = Dispatcher.BeginInvoke(
+                    DispatcherPriority.Background,
+                    new Action(() => _ = ProcessRefreshLoopAsync()));
+            }
+        }
+    }
+
+    private bool ConsumeRefreshImmediateFlag()
+    {
+        lock (_refreshRequestSync)
+        {
+            var immediate = _refreshImmediateRequested;
+            _refreshImmediateRequested = false;
+            return immediate;
+        }
+    }
+
+    private bool IsRefreshObsolete(long requestVersion, CancellationToken token)
+    {
+        return token.IsCancellationRequested ||
+               requestVersion != Interlocked.Read(ref _refreshRequestVersion);
+    }
+
+    private async Task RefreshCandidatesAsync(long requestVersion, bool immediate = false)
     {
         if (_dialogController is null)
         {
@@ -229,6 +332,11 @@ public partial class OverlayWindow : Window
             return;
         }
 
+        if (IsRefreshObsolete(requestVersion, token))
+        {
+            return;
+        }
+
         if (!immediate)
         {
             try
@@ -241,8 +349,13 @@ public partial class OverlayWindow : Window
             }
         }
 
+        if (IsRefreshObsolete(requestVersion, token))
+        {
+            return;
+        }
+
         var initialOutcome = await QueryCandidatesByModeAsync(mode, keyword, sort, InitialQueryResultLimit, token);
-        if (initialOutcome is null || token.IsCancellationRequested)
+        if (initialOutcome is null || IsRefreshObsolete(requestVersion, token))
         {
             return;
         }
@@ -250,8 +363,8 @@ public partial class OverlayWindow : Window
         var (initialFilteredItems, initialStatus) = ApplyTypeFilter(initialOutcome.Value.Items, initialOutcome.Value.StatusMessage, initialOutcome.Value.CanApplyTypeFilter);
         var (initialDisplayItems, initialTrimmed) = CapDisplayItems(initialFilteredItems);
         SetStatus(BuildStatusForMode(mode, initialStatus, initialTrimmed, expandedScan: false));
-        UpdateItems(initialDisplayItems);
         UpdateSearchResultSummary(mode, initialDisplayItems.Count);
+        UpdateItems(initialDisplayItems);
 
         var expandedLimit = IsTypeFilterActive ? ExpandedTypeFilterQueryResultLimit : ExpandedQueryResultLimit;
         var shouldExpand =
@@ -261,6 +374,11 @@ public partial class OverlayWindow : Window
             (IsTypeFilterActive || initialDisplayItems.Count < DisplayResultLimit);
 
         if (!shouldExpand)
+        {
+            return;
+        }
+
+        if (IsRefreshObsolete(requestVersion, token))
         {
             return;
         }
@@ -280,11 +398,11 @@ public partial class OverlayWindow : Window
                     allowedExtensions,
                     token);
 
-                if (pagedOutcome is not null && !token.IsCancellationRequested)
+                if (pagedOutcome is not null && !IsRefreshObsolete(requestVersion, token))
                 {
                     SetStatus(BuildStatusForMode(mode, pagedOutcome.Value.StatusMessage, trimmed: false, expandedScan: true));
-                    UpdateItems(pagedOutcome.Value.Items);
                     UpdateSearchResultSummary(mode, pagedOutcome.Value.Items.Count);
+                    UpdateItems(pagedOutcome.Value.Items);
                 }
 
                 return;
@@ -292,7 +410,7 @@ public partial class OverlayWindow : Window
         }
 
         var expandedOutcome = await QueryCandidatesByModeAsync(mode, keyword, sort, expandedLimit, token);
-        if (expandedOutcome is null || token.IsCancellationRequested)
+        if (expandedOutcome is null || IsRefreshObsolete(requestVersion, token))
         {
             return;
         }
@@ -300,8 +418,8 @@ public partial class OverlayWindow : Window
         var (expandedFilteredItems, expandedStatus) = ApplyTypeFilter(expandedOutcome.Value.Items, expandedOutcome.Value.StatusMessage, expandedOutcome.Value.CanApplyTypeFilter);
         var (expandedDisplayItems, expandedTrimmed) = CapDisplayItems(expandedFilteredItems);
         SetStatus(BuildStatusForMode(mode, expandedStatus, expandedTrimmed, expandedScan: true));
-        UpdateItems(expandedDisplayItems);
         UpdateSearchResultSummary(mode, expandedDisplayItems.Count);
+        UpdateItems(expandedDisplayItems);
     }
 
     private async Task<(IReadOnlyList<FileCandidate> Items, string? StatusMessage)?> QueryTypeFilteredCandidatesByPagingAsync(
@@ -443,7 +561,8 @@ public partial class OverlayWindow : Window
                     statusMessage = null;
                     break;
                 case OverlayMode.Explorer:
-                    items = _explorerWindowService.GetOpenLocations(string.Empty);
+                    items = _explorerWindowService.GetOpenLocationsCached(string.Empty);
+                    _explorerWindowService.EnsureSnapshotFreshAsync(force: false);
                     caption = "资源管理器路径";
                     statusMessage = items.Count == 0
                         ? "未检测到可用资源管理器路径。"
@@ -616,8 +735,22 @@ public partial class OverlayWindow : Window
 
         ResultHost.Visibility = _items.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         var statusVisible = StatusText.Visibility == Visibility.Visible;
-        var baseCompactHeight = statusVisible ? CompactHeightDip : UltraCompactHeightDip;
-        Height = _items.Count > 0 ? ExpandedHeightDip : baseCompactHeight;
+        
+        // Let WPF measure the true dynamic height
+        this.SizeToContent = SizeToContent.Height;
+        this.UpdateLayout();
+        
+        var desiredHeight = this.ActualHeight;
+        // Enforce maximum height (XAML MaxHeight handles the bounds perfectly)
+        this.SizeToContent = SizeToContent.Manual;
+        if (desiredHeight > ExpandedHeightDip)
+        {
+            this.Height = ExpandedHeightDip;
+        }
+        else
+        {
+            this.Height = desiredHeight;
+        }
 
         if (changed ||
             previousVisibility != ResultHost.Visibility ||
@@ -632,6 +765,11 @@ public partial class OverlayWindow : Window
         if (_dialogHwnd == IntPtr.Zero || !NativeMethods.GetWindowRect(_dialogHwnd, out var rect))
         {
             return;
+        }
+
+        if (NativeMethods.DwmGetWindowAttribute(_dialogHwnd, NativeMethods.DWMWA_EXTENDED_FRAME_BOUNDS, out var extRect, Marshal.SizeOf(typeof(NativeMethods.RECT))) == 0)
+        {
+            rect = extRect;
         }
 
         var dpi = NativeMethods.GetDpiForWindow(_dialogHwnd);
@@ -697,16 +835,8 @@ public partial class OverlayWindow : Window
 
     private void UpdateResultHostHeight(double windowHeightDip)
     {
-        if (ResultHost.Visibility != Visibility.Visible)
-        {
-            return;
-        }
-
-        var summaryExtra = ResultSummaryText.Visibility == Visibility.Visible
-            ? ResultSummaryHeightDip
-            : 0.0;
-        var computed = windowHeightDip - HeaderAndStatusHeightDip - summaryExtra;
-        ResultHost.Height = Math.Max(ResultHost.MinHeight, computed);
+        // No longer forcing ResultHost to a specific height.
+        // XAML Grid RowDefinitions takes care of it natively.
     }
 
     private void SetStatus(string? message)
@@ -778,10 +908,10 @@ public partial class OverlayWindow : Window
 
     private bool IsTypeFilterActive => _preferredTypeFilterEnabled && !_isFolderDialog;
 
-    private async void SearchDebounceTimer_OnTick(object? sender, EventArgs e)
+    private void SearchDebounceTimer_OnTick(object? sender, EventArgs e)
     {
         _searchDebounceTimer.Stop();
-        await RefreshCandidatesAsync();
+        RequestCandidatesRefresh(immediate: false);
     }
 
     private async void DialogMonitorTimer_OnTick(object? sender, EventArgs e)
@@ -812,11 +942,22 @@ public partial class OverlayWindow : Window
 
             var controller = _dialogController;
             var shouldPollFilterText = ShouldPollDialogFilterText();
+            var shouldProbeFolderState = ShouldProbeFolderState();
+            if (!ShouldProbeDialogSnapshot(shouldPollFilterText, shouldProbeFolderState))
+            {
+                return;
+            }
+
             (bool IsFolderDialog, string FilterText) snapshot;
             try
             {
                 snapshot = await Task.Run(
-                        () => CaptureDialogSnapshot(controller, shouldPollFilterText, _lastFileTypeFilterText))
+                        () => CaptureDialogSnapshot(
+                            controller,
+                            shouldPollFilterText,
+                            _lastFileTypeFilterText,
+                            shouldProbeFolderState,
+                            _isFolderDialog))
                     .WaitAsync(DialogMonitorTimeout);
             }
             catch (TimeoutException)
@@ -827,6 +968,12 @@ public partial class OverlayWindow : Window
             if (_dialogController != controller)
             {
                 return;
+            }
+
+            _lastDialogSnapshotProbeUtc = DateTime.UtcNow;
+            if (shouldProbeFolderState)
+            {
+                _lastFolderStateProbeUtc = _lastDialogSnapshotProbeUtc;
             }
 
             var folderModeChanged = snapshot.IsFolderDialog != _isFolderDialog;
@@ -849,7 +996,7 @@ public partial class OverlayWindow : Window
             if (folderModeChanged || filterChanged)
             {
                 _searchDebounceTimer.Stop();
-                await RefreshCandidatesAsync(immediate: true);
+                RequestCandidatesRefresh(immediate: true);
             }
         }
         catch (Exception ex)
@@ -1143,14 +1290,33 @@ public partial class OverlayWindow : Window
 
     private void SortButton_OnClick(object sender, RoutedEventArgs e)
     {
-        _sortIndex = (_sortIndex + 1) % _sortOptions.Count;
-        UpdateSortButtonLabel();
-
-        if (_currentMode is OverlayMode.Search or OverlayMode.Recent)
+        var contextMenu = new ContextMenu();
+        for (int i = 0; i < _sortOptions.Count; i++)
         {
-            _searchDebounceTimer.Stop();
-            _ = RefreshCandidatesAsync(immediate: true);
+            var option = _sortOptions[i];
+            var item = new MenuItem
+            {
+                Header = option.Label,
+                IsChecked = _sortIndex == i,
+                Tag = i
+            };
+            item.Click += (s, args) =>
+            {
+                _sortIndex = (int)((MenuItem)s).Tag;
+                UpdateSortButtonLabel();
+                if (_currentMode is OverlayMode.Search or OverlayMode.Recent)
+                {
+                    _searchDebounceTimer.Stop();
+                    RequestCandidatesRefresh(immediate: true);
+                }
+            };
+            contextMenu.Items.Add(item);
         }
+        
+        contextMenu.PlacementTarget = SortButton;
+        contextMenu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+        SortButton.ContextMenu = contextMenu;
+        SortButton.ContextMenu.IsOpen = true;
     }
 
     private void SwitchMode(OverlayMode mode)
@@ -1164,12 +1330,13 @@ public partial class OverlayWindow : Window
         ApplyModeUiState();
 
         _searchDebounceTimer.Stop();
-        _ = RefreshCandidatesAsync(immediate: true);
+        RequestCandidatesRefresh(immediate: true);
     }
 
     private void ResetModeForDialog()
     {
-        _currentMode = _explorerWindowService.GetOpenLocations(string.Empty).Count > 0
+        _explorerWindowService.EnsureSnapshotFreshAsync(force: false);
+        _currentMode = _explorerWindowService.HasOpenLocationsCached()
             ? OverlayMode.Explorer
             : OverlayMode.Search;
     }
@@ -1191,7 +1358,8 @@ public partial class OverlayWindow : Window
 
     private void UpdateSortButtonLabel()
     {
-        SortLabelText.Text = _sortOptions[_sortIndex].Label;
+        // SortLabelText.Text = _sortOptions[_sortIndex].Label;
+        SortButton.ToolTip = $"点击切换搜索排序 ({_sortOptions[_sortIndex].Label})";
     }
 
     private void TypeFilterButton_OnClick(object sender, RoutedEventArgs e)
@@ -1207,7 +1375,7 @@ public partial class OverlayWindow : Window
         ApplyModeUiState();
 
         _searchDebounceTimer.Stop();
-        _ = RefreshCandidatesAsync(immediate: true);
+        RequestCandidatesRefresh(immediate: true);
     }
 
     private void ConfigureDropInteropCompatibility(IntPtr overlayHwnd)
@@ -1238,7 +1406,7 @@ public partial class OverlayWindow : Window
         }
     }
 
-    private async void Window_OnPreviewDrop(object sender, System.Windows.DragEventArgs e)
+    private void Window_OnPreviewDrop(object sender, System.Windows.DragEventArgs e)
     {
         var paths = ExtractDroppedPaths(e.Data);
         if (paths.Count == 0)
@@ -1252,7 +1420,7 @@ public partial class OverlayWindow : Window
 
         if (_currentMode == OverlayMode.Tray)
         {
-            await RefreshCandidatesAsync(immediate: true);
+            RequestCandidatesRefresh(immediate: true);
         }
 
         e.Handled = true;
@@ -1268,17 +1436,28 @@ public partial class OverlayWindow : Window
 
     private void ListBoxItem_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
     {
-        if (_currentMode == OverlayMode.Tray && sender is ListBoxItem { ContextMenu: { } menu } item)
+        if (sender is ListBoxItem { DataContext: FileCandidate candidate } item)
         {
-            menu.PlacementTarget = item;
-            menu.IsOpen = true;
+            if (_currentMode == OverlayMode.Tray && item.ContextMenu is { } menu)
+            {
+                menu.PlacementTarget = item;
+                menu.IsOpen = true;
+            }
+            else
+            {
+                if (!ReferenceEquals(ResultList.SelectedItem, candidate))
+                {
+                    ResultList.SelectedItem = candidate;
+                }
+                _ = ExecuteSingleAsync(candidate);
+            }
             e.Handled = true;
         }
     }
 
     private void ListBoxItem_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
-        if (e.ClickCount != 1 || sender is not ListBoxItem { DataContext: FileCandidate candidate })
+        if (sender is not ListBoxItem { DataContext: FileCandidate candidate })
         {
             return;
         }
@@ -1288,7 +1467,8 @@ public partial class OverlayWindow : Window
             ResultList.SelectedItem = candidate;
         }
 
-        _ = ExecuteSingleAsync(candidate);
+        _ = ExecuteConfirmAsync(candidate);
+        e.Handled = true;
     }
 
     private void TrayMenuItem_Pin_OnClick(object sender, RoutedEventArgs e)
@@ -1297,7 +1477,7 @@ public partial class OverlayWindow : Window
             menuItem.DataContext is FileCandidate candidate)
         {
             _trayRepository.PinToTop(candidate.FullPath);
-            _ = RefreshCandidatesAsync(immediate: true);
+            RequestCandidatesRefresh(immediate: true);
         }
     }
 
@@ -1307,7 +1487,7 @@ public partial class OverlayWindow : Window
             menuItem.DataContext is FileCandidate candidate)
         {
             _trayRepository.Remove(candidate.FullPath);
-            _ = RefreshCandidatesAsync(immediate: true);
+            RequestCandidatesRefresh(immediate: true);
         }
     }
 
@@ -1468,19 +1648,50 @@ public partial class OverlayWindow : Window
         return IsTypeFilterActive && _currentMode is OverlayMode.Search or OverlayMode.Recent;
     }
 
-    private void UpdateDialogMonitorInterval()
+    private bool ShouldProbeFolderState()
     {
-        _dialogMonitorTimer.Interval = ShouldPollDialogFilterText()
+        if (_lastFolderStateProbeUtc == DateTime.MinValue)
+        {
+            return true;
+        }
+
+        return DateTime.UtcNow - _lastFolderStateProbeUtc >= FolderStateProbeInterval;
+    }
+
+    private bool ShouldProbeDialogSnapshot(bool shouldPollFilterText, bool shouldProbeFolderState)
+    {
+        if (shouldProbeFolderState)
+        {
+            return true;
+        }
+
+        var interval = shouldPollFilterText
             ? DialogMonitorBusyInterval
             : DialogMonitorIdleInterval;
+
+        if (_lastDialogSnapshotProbeUtc == DateTime.MinValue)
+        {
+            return true;
+        }
+
+        return DateTime.UtcNow - _lastDialogSnapshotProbeUtc >= interval;
+    }
+
+    private void UpdateDialogMonitorInterval()
+    {
+        _dialogMonitorTimer.Interval = DialogMonitorLivenessInterval;
     }
 
     private static (bool IsFolderDialog, string FilterText) CaptureDialogSnapshot(
         FileDialogAutomationController controller,
         bool includeFilterText,
-        string fallbackFilterText)
+        string fallbackFilterText,
+        bool includeFolderState,
+        bool fallbackFolderState)
     {
-        var isFolderDialog = controller.IsFolderSelectionDialog();
+        var isFolderDialog = includeFolderState
+            ? controller.IsFolderSelectionDialog()
+            : fallbackFolderState;
         if (!includeFilterText)
         {
             return (isFolderDialog, fallbackFilterText);
