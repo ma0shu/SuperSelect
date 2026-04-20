@@ -169,9 +169,15 @@ public partial class OverlayWindow : Window
 
     private void DialogRectPollTimer_OnTick(object? sender, EventArgs e)
     {
-        if (!IsVisible || _dialogHwnd == IntPtr.Zero || !NativeMethods.IsWindow(_dialogHwnd))
+        if (!IsVisible || _dialogHwnd == IntPtr.Zero)
         {
             _dialogRectPollTimer.Stop();
+            return;
+        }
+
+        if (!NativeMethods.IsWindow(_dialogHwnd) || !NativeMethods.IsWindowVisible(_dialogHwnd))
+        {
+            DetachDialog();
             return;
         }
 
@@ -319,6 +325,16 @@ public partial class OverlayWindow : Window
         CancelAndDisposeRefreshCts();
         CancelAndDisposeSingleSelectCts();
         Close();
+    }
+
+    public void OnDialogContentChanged()
+    {
+        if (!IsVisible || _dialogHwnd == IntPtr.Zero || _dialogController is null)
+        {
+            return;
+        }
+
+        _ = ProbeDialogSnapshotAsync(forceProbe: true);
     }
 
     protected override void OnClosing(CancelEventArgs e)
@@ -853,7 +869,18 @@ public partial class OverlayWindow : Window
 
     private void PositionToDialog()
     {
-        if (_dialogHwnd == IntPtr.Zero || !NativeMethods.GetWindowRect(_dialogHwnd, out var rect))
+        if (_dialogHwnd == IntPtr.Zero)
+        {
+            return;
+        }
+
+        if (!NativeMethods.IsWindow(_dialogHwnd) || !NativeMethods.IsWindowVisible(_dialogHwnd))
+        {
+            DetachDialog();
+            return;
+        }
+
+        if (!NativeMethods.GetWindowRect(_dialogHwnd, out var rect))
         {
             return;
         }
@@ -1066,6 +1093,11 @@ public partial class OverlayWindow : Window
 
     private async void DialogMonitorTimer_OnTick(object? sender, EventArgs e)
     {
+        await ProbeDialogSnapshotAsync(forceProbe: false);
+    }
+
+    private async Task ProbeDialogSnapshotAsync(bool forceProbe)
+    {
         if (Interlocked.CompareExchange(ref _dialogMonitorInFlight, 1, 0) != 0)
         {
             return;
@@ -1092,8 +1124,8 @@ public partial class OverlayWindow : Window
 
             var controller = _dialogController;
             var shouldPollFilterText = ShouldPollDialogFilterText();
-            var shouldProbeFolderState = ShouldProbeFolderState();
-            if (!ShouldProbeDialogSnapshot(shouldPollFilterText, shouldProbeFolderState))
+            var shouldProbeFolderState = forceProbe || ShouldProbeFolderState();
+            if (!forceProbe && !ShouldProbeDialogSnapshot(shouldPollFilterText, shouldProbeFolderState))
             {
                 return;
             }
@@ -1152,7 +1184,7 @@ public partial class OverlayWindow : Window
         catch (Exception ex)
         {
             AppLogger.LogException(
-                "OverlayWindow.DialogMonitorTimer_OnTick",
+                "OverlayWindow.ProbeDialogSnapshotAsync",
                 ex,
                 throttle: TimeSpan.FromSeconds(3));
             DetachDialog();

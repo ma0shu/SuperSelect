@@ -6,20 +6,37 @@ using SuperSelect.App.Native;
 
 namespace SuperSelect.App.Services;
 
-internal sealed class ExplorerWindowService
+internal sealed class ExplorerWindowService : IDisposable
 {
-    private static readonly TimeSpan SnapshotTtl = TimeSpan.FromSeconds(1);
-    private static readonly TimeSpan EmptySnapshotNegativeTtl = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan SnapshotTtl = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan EmptySnapshotNegativeTtl = TimeSpan.FromSeconds(4);
+    private static readonly TimeSpan EventRefreshDebounce = TimeSpan.FromMilliseconds(120);
 
     private readonly object _snapshotSync = new();
     private IReadOnlyList<FileCandidate> _cachedSnapshot = [];
     private DateTime _lastSnapshotUtc = DateTime.MinValue;
     private DateTime _emptySnapshotValidUntilUtc = DateTime.MinValue;
     private int _refreshInFlight;
+    private int _eventRefreshQueued;
+    private bool _disposed;
+
+    private NativeMethods.WinEventDelegate? _windowEventCallback;
+    private IntPtr _foregroundHook;
+    private IntPtr _createHook;
+    private IntPtr _destroyHook;
+    private IntPtr _showHook;
+    private IntPtr _hideHook;
 
     public ExplorerWindowService()
     {
+        InitializeWindowEventHooks();
         EnsureSnapshotFreshAsync(force: true);
+    }
+
+    public void Dispose()
+    {
+        _disposed = true;
+        StopWindowEventHooks();
     }
 
     public IReadOnlyList<FileCandidate> GetOpenLocations(string keyword)
@@ -82,6 +99,11 @@ internal sealed class ExplorerWindowService
 
     public void EnsureSnapshotFreshAsync(bool force = false)
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         var nowUtc = DateTime.UtcNow;
         bool shouldRefresh;
 
@@ -123,6 +145,11 @@ internal sealed class ExplorerWindowService
 
     private IReadOnlyList<FileCandidate> RefreshSnapshotNow()
     {
+        if (_disposed)
+        {
+            return [];
+        }
+
         var discovered = DiscoverOpenLocations();
         var nowUtc = DateTime.UtcNow;
 
@@ -149,6 +176,160 @@ internal sealed class ExplorerWindowService
         }
 
         return DeduplicatePreservingOrder(result);
+    }
+
+    private void InitializeWindowEventHooks()
+    {
+        _windowEventCallback = OnWindowEvent;
+
+        const uint flags = NativeMethods.WINEVENT_OUTOFCONTEXT | NativeMethods.WINEVENT_SKIPOWNPROCESS;
+
+        _foregroundHook = NativeMethods.SetWinEventHook(
+            NativeMethods.EVENT_SYSTEM_FOREGROUND,
+            NativeMethods.EVENT_SYSTEM_FOREGROUND,
+            IntPtr.Zero,
+            _windowEventCallback,
+            0,
+            0,
+            flags);
+
+        _createHook = NativeMethods.SetWinEventHook(
+            NativeMethods.EVENT_OBJECT_CREATE,
+            NativeMethods.EVENT_OBJECT_CREATE,
+            IntPtr.Zero,
+            _windowEventCallback,
+            0,
+            0,
+            flags);
+
+        _destroyHook = NativeMethods.SetWinEventHook(
+            NativeMethods.EVENT_OBJECT_DESTROY,
+            NativeMethods.EVENT_OBJECT_DESTROY,
+            IntPtr.Zero,
+            _windowEventCallback,
+            0,
+            0,
+            flags);
+
+        _showHook = NativeMethods.SetWinEventHook(
+            NativeMethods.EVENT_OBJECT_SHOW,
+            NativeMethods.EVENT_OBJECT_SHOW,
+            IntPtr.Zero,
+            _windowEventCallback,
+            0,
+            0,
+            flags);
+
+        _hideHook = NativeMethods.SetWinEventHook(
+            NativeMethods.EVENT_OBJECT_HIDE,
+            NativeMethods.EVENT_OBJECT_HIDE,
+            IntPtr.Zero,
+            _windowEventCallback,
+            0,
+            0,
+            flags);
+    }
+
+    private void StopWindowEventHooks()
+    {
+        Unhook(ref _foregroundHook);
+        Unhook(ref _createHook);
+        Unhook(ref _destroyHook);
+        Unhook(ref _showHook);
+        Unhook(ref _hideHook);
+        _windowEventCallback = null;
+    }
+
+    private static void Unhook(ref IntPtr hook)
+    {
+        if (hook == IntPtr.Zero)
+        {
+            return;
+        }
+
+        _ = NativeMethods.UnhookWinEvent(hook);
+        hook = IntPtr.Zero;
+    }
+
+    private void OnWindowEvent(
+        IntPtr hWinEventHook,
+        uint eventType,
+        IntPtr hwnd,
+        int idObject,
+        int idChild,
+        uint dwEventThread,
+        uint dwmsEventTime)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        if (hwnd == IntPtr.Zero)
+        {
+            return;
+        }
+
+        if (!IsExplorerWindowOrChild(hwnd))
+        {
+            return;
+        }
+
+        ScheduleEventDrivenRefresh();
+    }
+
+    private bool IsExplorerWindowOrChild(IntPtr hwnd)
+    {
+        if (IsExplorerClassWindow(hwnd))
+        {
+            return true;
+        }
+
+        var root = NativeMethods.GetAncestor(hwnd, NativeMethods.GA_ROOT);
+        return root != IntPtr.Zero && IsExplorerClassWindow(root);
+    }
+
+    private static bool IsExplorerClassWindow(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        var className = NativeMethods.GetWindowClassName(hwnd);
+        return string.Equals(className, "CabinetWClass", StringComparison.Ordinal) ||
+               string.Equals(className, "ExploreWClass", StringComparison.Ordinal);
+    }
+
+    private void ScheduleEventDrivenRefresh()
+    {
+        lock (_snapshotSync)
+        {
+            _lastSnapshotUtc = DateTime.MinValue;
+            _emptySnapshotValidUntilUtc = DateTime.MinValue;
+        }
+
+        if (Interlocked.Exchange(ref _eventRefreshQueued, 1) != 0)
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(EventRefreshDebounce).ConfigureAwait(false);
+                EnsureSnapshotFreshAsync(force: true);
+            }
+            catch
+            {
+                // Keep stale snapshot on scheduling failures.
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _eventRefreshQueued, 0);
+            }
+        });
     }
 
     private static IReadOnlyList<FileCandidate> FilterSnapshot(

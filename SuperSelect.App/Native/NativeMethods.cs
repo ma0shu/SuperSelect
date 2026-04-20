@@ -8,8 +8,14 @@ internal static class NativeMethods
     internal const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
     internal const uint EVENT_SYSTEM_DIALOGSTART = 0x0010;
     internal const uint EVENT_SYSTEM_DIALOGEND = 0x0011;
+    internal const uint EVENT_OBJECT_CREATE = 0x8000;
+    internal const uint EVENT_OBJECT_DESTROY = 0x8001;
     internal const uint EVENT_OBJECT_SHOW = 0x8002;
+    internal const uint EVENT_OBJECT_HIDE = 0x8003;
+    internal const uint EVENT_OBJECT_SELECTION = 0x8006;
     internal const uint EVENT_OBJECT_LOCATIONCHANGE = 0x800B;
+    internal const uint EVENT_OBJECT_NAMECHANGE = 0x800C;
+    internal const uint EVENT_OBJECT_VALUECHANGE = 0x800E;
 
     internal const uint WINEVENT_OUTOFCONTEXT = 0x0000;
     internal const uint WINEVENT_SKIPOWNPROCESS = 0x0002;

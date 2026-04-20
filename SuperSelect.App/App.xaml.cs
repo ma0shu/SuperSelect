@@ -17,6 +17,8 @@ public partial class App : System.Windows.Application
     private AppTrayIcon? _trayIcon;
     private HwndSource? _hotkeySource;
     private bool _isExitRequested;
+    private DispatcherTimer? _dialogDetachDebounceTimer;
+    private IntPtr _activeDialogHwnd;
 
     private EverythingService? _everythingService;
     private TrayRepository? _trayRepository;
@@ -27,6 +29,7 @@ public partial class App : System.Windows.Application
     private static readonly TimeSpan MemoryTrimStartDelay = TimeSpan.FromMilliseconds(1000);
     private const long MemoryTrimManagedThresholdBytes = 64L * 1024 * 1024;
     private const string DialogDetachedTrimReason = "DialogDetached";
+    private static readonly TimeSpan DialogDetachDebounceInterval = TimeSpan.FromMilliseconds(90);
     private const int MainWindowHotkeyId = 0x5353;
     private const uint MainWindowHotkeyModifiers = Native.NativeMethods.MOD_CONTROL | Native.NativeMethods.MOD_SHIFT;
     private const uint MainWindowHotkeyVKey = (uint)'M';
@@ -52,7 +55,13 @@ public partial class App : System.Windows.Application
         _dialogWatcher = new WinEventFileDialogWatcher(Dispatcher);
         _dialogWatcher.ActiveDialogChanged += OnActiveDialogChanged;
         _dialogWatcher.ActiveDialogMoved += OnActiveDialogMoved;
+        _dialogWatcher.ActiveDialogContentChanged += OnActiveDialogContentChanged;
         _dialogWatcher.Start();
+        _dialogDetachDebounceTimer = new DispatcherTimer(DispatcherPriority.Input)
+        {
+            Interval = DialogDetachDebounceInterval,
+        };
+        _dialogDetachDebounceTimer.Tick += DialogDetachDebounceTimer_OnTick;
 
         _trayIcon = new AppTrayIcon(LoadAppIcon());
         _trayIcon.OpenRequested += OnTrayOpenRequested;
@@ -82,7 +91,15 @@ public partial class App : System.Windows.Application
         {
             _dialogWatcher.ActiveDialogChanged -= OnActiveDialogChanged;
             _dialogWatcher.ActiveDialogMoved -= OnActiveDialogMoved;
+            _dialogWatcher.ActiveDialogContentChanged -= OnActiveDialogContentChanged;
             _dialogWatcher.Dispose();
+        }
+
+        if (_dialogDetachDebounceTimer is not null)
+        {
+            _dialogDetachDebounceTimer.Tick -= DialogDetachDebounceTimer_OnTick;
+            _dialogDetachDebounceTimer.Stop();
+            _dialogDetachDebounceTimer = null;
         }
 
         if (_overlayWindow is not null)
@@ -90,6 +107,9 @@ public partial class App : System.Windows.Application
             _overlayWindow.Shutdown();
             _overlayWindow = null;
         }
+
+        _explorerWindowService?.Dispose();
+        _explorerWindowService = null;
 
         if (MainWindow is Window mainWindow)
         {
@@ -125,14 +145,24 @@ public partial class App : System.Windows.Application
 
         if (hwnd is { } target && target != IntPtr.Zero)
         {
-            _overlayWindow.AttachToDialog(target);
+            _dialogDetachDebounceTimer?.Stop();
+            if (_activeDialogHwnd != target)
+            {
+                _activeDialogHwnd = target;
+                _overlayWindow.AttachToDialog(target);
+            }
+
             return;
         }
 
-        _overlayWindow.DetachDialog();
-        if (MainWindow is null)
+        if (_activeDialogHwnd == IntPtr.Zero)
         {
-            RequestMemoryTrim("DialogDetached");
+            return;
+        }
+
+        if (_dialogDetachDebounceTimer is not null && !_dialogDetachDebounceTimer.IsEnabled)
+        {
+            _dialogDetachDebounceTimer.Start();
         }
     }
 
@@ -143,7 +173,43 @@ public partial class App : System.Windows.Application
             return;
         }
 
+        if (_activeDialogHwnd == IntPtr.Zero || hwnd != _activeDialogHwnd)
+        {
+            return;
+        }
+
         _overlayWindow?.RepositionToDialog();
+    }
+
+    private void OnActiveDialogContentChanged(IntPtr hwnd)
+    {
+        if (_isExitRequested || _overlayWindow is null)
+        {
+            return;
+        }
+
+        if (_activeDialogHwnd == IntPtr.Zero || hwnd != _activeDialogHwnd)
+        {
+            return;
+        }
+
+        _overlayWindow.OnDialogContentChanged();
+    }
+
+    private void DialogDetachDebounceTimer_OnTick(object? sender, EventArgs e)
+    {
+        _dialogDetachDebounceTimer?.Stop();
+        if (_isExitRequested || _overlayWindow is null || _activeDialogHwnd == IntPtr.Zero)
+        {
+            return;
+        }
+
+        _activeDialogHwnd = IntPtr.Zero;
+        _overlayWindow.DetachDialog();
+        if (MainWindow is null)
+        {
+            RequestMemoryTrim("DialogDetached");
+        }
     }
 
     private void OnTrayOpenRequested()
@@ -209,8 +275,16 @@ public partial class App : System.Windows.Application
         {
             _dialogWatcher.ActiveDialogChanged -= OnActiveDialogChanged;
             _dialogWatcher.ActiveDialogMoved -= OnActiveDialogMoved;
+            _dialogWatcher.ActiveDialogContentChanged -= OnActiveDialogContentChanged;
             _dialogWatcher.Dispose();
             _dialogWatcher = null;
+        }
+
+        if (_dialogDetachDebounceTimer is not null)
+        {
+            _dialogDetachDebounceTimer.Tick -= DialogDetachDebounceTimer_OnTick;
+            _dialogDetachDebounceTimer.Stop();
+            _dialogDetachDebounceTimer = null;
         }
 
         if (_overlayWindow is not null)
@@ -218,6 +292,9 @@ public partial class App : System.Windows.Application
             _overlayWindow.Shutdown();
             _overlayWindow = null;
         }
+
+        _explorerWindowService?.Dispose();
+        _explorerWindowService = null;
 
         if (MainWindow is not null)
         {

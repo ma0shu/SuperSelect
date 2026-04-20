@@ -11,8 +11,12 @@ internal sealed class WinEventFileDialogWatcher : IDisposable
     private IntPtr _dialogHook;
     private IntPtr _objectShowHook;
     private IntPtr _locationHook;
+    private IntPtr _selectionHook;
+    private IntPtr _nameChangeHook;
+    private IntPtr _valueChangeHook;
     private IntPtr _activeDialog;
     private readonly DispatcherTimer _teardownTimer;
+    private int _contentChangePending;
 
     public WinEventFileDialogWatcher(Dispatcher dispatcher)
     {
@@ -39,6 +43,7 @@ internal sealed class WinEventFileDialogWatcher : IDisposable
 
     public event Action<IntPtr?>? ActiveDialogChanged;
     public event Action<IntPtr>? ActiveDialogMoved;
+    public event Action<IntPtr>? ActiveDialogContentChanged;
 
     public bool IsRunning =>
         _foregroundHook != IntPtr.Zero &&
@@ -91,12 +96,47 @@ internal sealed class WinEventFileDialogWatcher : IDisposable
             0,
             NativeMethods.WINEVENT_OUTOFCONTEXT | NativeMethods.WINEVENT_SKIPOWNPROCESS);
 
+        _selectionHook = NativeMethods.SetWinEventHook(
+            NativeMethods.EVENT_OBJECT_SELECTION,
+            NativeMethods.EVENT_OBJECT_SELECTION,
+            IntPtr.Zero,
+            _callback,
+            0,
+            0,
+            NativeMethods.WINEVENT_OUTOFCONTEXT | NativeMethods.WINEVENT_SKIPOWNPROCESS);
+
+        _nameChangeHook = NativeMethods.SetWinEventHook(
+            NativeMethods.EVENT_OBJECT_NAMECHANGE,
+            NativeMethods.EVENT_OBJECT_NAMECHANGE,
+            IntPtr.Zero,
+            _callback,
+            0,
+            0,
+            NativeMethods.WINEVENT_OUTOFCONTEXT | NativeMethods.WINEVENT_SKIPOWNPROCESS);
+
+        _valueChangeHook = NativeMethods.SetWinEventHook(
+            NativeMethods.EVENT_OBJECT_VALUECHANGE,
+            NativeMethods.EVENT_OBJECT_VALUECHANGE,
+            IntPtr.Zero,
+            _callback,
+            0,
+            0,
+            NativeMethods.WINEVENT_OUTOFCONTEXT | NativeMethods.WINEVENT_SKIPOWNPROCESS);
+
         if (_foregroundHook == IntPtr.Zero ||
             _dialogHook == IntPtr.Zero ||
             _objectShowHook == IntPtr.Zero ||
             _locationHook == IntPtr.Zero)
         {
             Stop();
+            return;
+        }
+
+        if (_selectionHook == IntPtr.Zero ||
+            _nameChangeHook == IntPtr.Zero ||
+            _valueChangeHook == IntPtr.Zero)
+        {
+            AppLogger.LogWarning("WinEventFileDialogWatcher: some content change hooks failed, fallback to polling snapshot updates.");
         }
     }
 
@@ -126,8 +166,27 @@ internal sealed class WinEventFileDialogWatcher : IDisposable
             _locationHook = IntPtr.Zero;
         }
 
+        if (_selectionHook != IntPtr.Zero)
+        {
+            _ = NativeMethods.UnhookWinEvent(_selectionHook);
+            _selectionHook = IntPtr.Zero;
+        }
+
+        if (_nameChangeHook != IntPtr.Zero)
+        {
+            _ = NativeMethods.UnhookWinEvent(_nameChangeHook);
+            _nameChangeHook = IntPtr.Zero;
+        }
+
+        if (_valueChangeHook != IntPtr.Zero)
+        {
+            _ = NativeMethods.UnhookWinEvent(_valueChangeHook);
+            _valueChangeHook = IntPtr.Zero;
+        }
+
         _teardownTimer.Stop();
         _activeDialog = IntPtr.Zero;
+        Interlocked.Exchange(ref _contentChangePending, 0);
     }
 
     public void Dispose()
@@ -145,6 +204,18 @@ internal sealed class WinEventFileDialogWatcher : IDisposable
         uint dwEventThread,
         uint dwmsEventTime)
     {
+        if (eventType is NativeMethods.EVENT_OBJECT_SELECTION or
+            NativeMethods.EVENT_OBJECT_NAMECHANGE or
+            NativeMethods.EVENT_OBJECT_VALUECHANGE)
+        {
+            if (IsActiveDialogRelatedWindow(hwnd))
+            {
+                QueueActiveDialogContentChanged();
+            }
+
+            return;
+        }
+
         if (idObject != NativeMethods.OBJID_WINDOW || idChild != 0)
         {
             return;
@@ -176,6 +247,43 @@ internal sealed class WinEventFileDialogWatcher : IDisposable
         _ = _dispatcher.BeginInvoke(
             priority,
             new Action(() => EvaluateActiveDialog(eventType, hwnd)));
+    }
+
+    private bool IsActiveDialogRelatedWindow(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero || _activeDialog == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        if (hwnd == _activeDialog)
+        {
+            return true;
+        }
+
+        var root = NativeMethods.GetAncestor(hwnd, NativeMethods.GA_ROOT);
+        return root != IntPtr.Zero && root == _activeDialog;
+    }
+
+    private void QueueActiveDialogContentChanged()
+    {
+        if (Interlocked.Exchange(ref _contentChangePending, 1) != 0)
+        {
+            return;
+        }
+
+        _ = _dispatcher.BeginInvoke(
+            DispatcherPriority.Send,
+            new Action(() =>
+            {
+                Interlocked.Exchange(ref _contentChangePending, 0);
+                if (_activeDialog == IntPtr.Zero || !NativeMethods.IsWindow(_activeDialog))
+                {
+                    return;
+                }
+
+                ActiveDialogContentChanged?.Invoke(_activeDialog);
+            }));
     }
 
     private void EvaluateActiveDialog(uint eventType, IntPtr sourceHwnd)
