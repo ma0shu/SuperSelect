@@ -182,8 +182,11 @@ public partial class OverlayWindow : Window
     {
         if (Resources[key] is SolidColorBrush brush)
         {
-            brush.Color = color;
-            return;
+            if (!brush.IsFrozen)
+            {
+                brush.Color = color;
+                return;
+            }
         }
 
         Resources[key] = new SolidColorBrush(color);
