@@ -9,23 +9,44 @@
         Height="420"
         Width="680"
         MinHeight="360"
-        MinWidth="560">
+        MinWidth="560"
+        Background="{DynamicResource MainWindowWindowBackgroundBrush}">
+    <Window.Resources>
+        <SolidColorBrush x:Key="MainWindowWindowBackgroundBrush" Color="#F4F6F8" />
+        <SolidColorBrush x:Key="MainWindowPanelBackgroundBrush" Color="#FFFFFF" />
+        <SolidColorBrush x:Key="MainWindowListBackgroundBrush" Color="#FFFFFF" />
+        <SolidColorBrush x:Key="MainWindowBorderBrush" Color="#E2E8F0" />
+        <SolidColorBrush x:Key="MainWindowPrimaryTextBrush" Color="#334155" />
+        <SolidColorBrush x:Key="MainWindowSecondaryTextBrush" Color="#64748B" />
+        <SolidColorBrush x:Key="MainWindowStatusTextBrush" Color="#475569" />
+        <SolidColorBrush x:Key="MainWindowWarningBrush" Color="#EF4444" />
+        <SolidColorBrush x:Key="MainWindowAccentBrush" Color="#2563EB" />
+        <SolidColorBrush x:Key="MainWindowDangerBrush" Color="#EF4444" />
+        <SolidColorBrush x:Key="MainWindowItemIconBrush" Color="#94A3B8" />
+        <SolidColorBrush x:Key="MainWindowItemNameBrush" Color="#1E293B" />
+        <SolidColorBrush x:Key="MainWindowItemSecondaryBrush" Color="#94A3B8" />
+        <SolidColorBrush x:Key="MainWindowItemHoverBrush" Color="#F8FAFC" />
+        <SolidColorBrush x:Key="MainWindowItemSelectedBrush" Color="#EFF6FF" />
+        <SolidColorBrush x:Key="MainWindowFolderIconBrush" Color="#FCD34D" />
+    </Window.Resources>
     <Grid Margin="16">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <TextBlock x:Name="HookStatusText"
                    FontWeight="SemiBold"
-                   FontSize="15" />
+                   FontSize="15"
+                   Foreground="{DynamicResource MainWindowPrimaryTextBrush}" />
 
         <TextBlock x:Name="AdminWarningText"
                    Grid.Row="1"
                    Margin="0,4,0,0"
-                   Foreground="#EF4444"
+                   Foreground="{DynamicResource MainWindowWarningBrush}"
                    FontWeight="SemiBold"
                    Visibility="Collapsed"
                    Text="非管理员权限运行中，无法注入管理员权限进程（如应用安装程序）" />
@@ -34,7 +55,7 @@
                    Margin="0,16,0,12"
                    TextWrapping="Wrap"
                    FontSize="12"
-                   Foreground="#64748B"
+                   Foreground="{DynamicResource MainWindowSecondaryTextBrush}"
                    Text="运行后会监听系统文件对话框，并在对话框下方弹出一行快速面板。全局快捷键 Ctrl+Shift+M 可唤起本窗口。" />
 
         <Grid Grid.Row="2"
@@ -47,23 +68,24 @@
             </Grid.RowDefinitions>
 
             <Grid Grid.Row="0" Margin="0,0,0,8">
-                <TextBlock Text="文件托盘" FontWeight="SemiBold" VerticalAlignment="Center" Foreground="#334155" />
+                <TextBlock Text="文件托盘" FontWeight="SemiBold" VerticalAlignment="Center" Foreground="{DynamicResource MainWindowPrimaryTextBrush}" />
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-                    <Button Width="64" Height="24" Margin="0,0,8,0" Click="RefreshButton_OnClick" Background="Transparent" BorderThickness="0" Foreground="#2563EB" Cursor="Hand">刷新</Button>
-                    <Button Width="64" Height="24" Margin="0,0,8,0" Click="RemoveButton_OnClick" Background="Transparent" BorderThickness="0" Foreground="#2563EB" Cursor="Hand">移除</Button>
-                    <Button Width="64" Height="24" Click="ClearButton_OnClick" Background="Transparent" BorderThickness="0" Foreground="#EF4444" Cursor="Hand">清空</Button>
+                    <Button Width="64" Height="24" Margin="0,0,8,0" Click="RefreshButton_OnClick" Background="Transparent" BorderThickness="0" Foreground="{DynamicResource MainWindowAccentBrush}" Cursor="Hand">刷新</Button>
+                    <Button Width="64" Height="24" Margin="0,0,8,0" Click="RemoveButton_OnClick" Background="Transparent" BorderThickness="0" Foreground="{DynamicResource MainWindowAccentBrush}" Cursor="Hand">移除</Button>
+                    <Button Width="64" Height="24" Click="ClearButton_OnClick" Background="Transparent" BorderThickness="0" Foreground="{DynamicResource MainWindowDangerBrush}" Cursor="Hand">清空</Button>
                 </StackPanel>
             </Grid>
 
             <Border Grid.Row="1"
                     CornerRadius="4"
-                    BorderBrush="#E2E8F0"
+                    BorderBrush="{DynamicResource MainWindowBorderBrush}"
                     BorderThickness="1"
-                    Background="#FFFFFF">
+                    Background="{DynamicResource MainWindowPanelBackgroundBrush}">
                 <ListBox x:Name="TrayList"
                          AllowDrop="True"
                          BorderThickness="0"
-                         Background="Transparent"
+                         Background="{DynamicResource MainWindowListBackgroundBrush}"
+                         Foreground="{DynamicResource MainWindowPrimaryTextBrush}"
                          PreviewDragOver="TrayDropHost_OnPreviewDragOver"
                          PreviewDrop="TrayDropHost_OnPreviewDrop">
                     <ListBox.ItemContainerStyle>
@@ -74,10 +96,10 @@
                             <Setter Property="Padding" Value="6,4"/>
                             <Style.Triggers>
                                 <Trigger Property="IsMouseOver" Value="True">
-                                    <Setter Property="Background" Value="#F8FAFC" />
+                                    <Setter Property="Background" Value="{DynamicResource MainWindowItemHoverBrush}" />
                                 </Trigger>
                                 <Trigger Property="IsSelected" Value="True">
-                                    <Setter Property="Background" Value="#EFF6FF" />
+                                    <Setter Property="Background" Value="{DynamicResource MainWindowItemSelectedBrush}" />
                                 </Trigger>
                             </Style.Triggers>
                         </Style>
@@ -90,14 +112,14 @@
                                     <ColumnDefinition Width="4.5*" />
                                     <ColumnDefinition Width="3*" />
                                 </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" x:Name="IconText" FontFamily="Segoe Fluent Icons" Text="&#xE7C3;" Foreground="#94A3B8" FontSize="14" VerticalAlignment="Center" />
-                                <TextBlock Grid.Column="1" Text="{Binding DisplayName}" FontSize="12" Foreground="#1E293B" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,0,12,0" />
-                                <TextBlock Grid.Column="2" Text="{Binding SecondaryText}" FontSize="11" Foreground="#94A3B8" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Grid.Column="0" x:Name="IconText" FontFamily="Segoe Fluent Icons" Text="&#xE7C3;" Foreground="{DynamicResource MainWindowItemIconBrush}" FontSize="14" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1" Text="{Binding DisplayName}" FontSize="12" Foreground="{DynamicResource MainWindowItemNameBrush}" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,0,12,0" />
+                                <TextBlock Grid.Column="2" Text="{Binding SecondaryText}" FontSize="11" Foreground="{DynamicResource MainWindowItemSecondaryBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
                             </Grid>
                             <DataTemplate.Triggers>
                                 <DataTrigger Binding="{Binding IsDirectory}" Value="True">
                                     <Setter TargetName="IconText" Property="Text" Value="&#xE8D5;" />
-                                    <Setter TargetName="IconText" Property="Foreground" Value="#FCD34D" />
+                                    <Setter TargetName="IconText" Property="Foreground" Value="{DynamicResource MainWindowFolderIconBrush}" />
                                 </DataTrigger>
                             </DataTemplate.Triggers>
                         </DataTemplate>
@@ -106,7 +128,115 @@
             </Border>
         </Grid>
 
-        <StackPanel Grid.Row="3"
+        <Grid Grid.Row="3"
+              Margin="0,10,0,0">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <Grid Grid.Row="0" Margin="0,0,0,8">
+                <TextBlock Text="最近屏蔽项"
+                           FontWeight="SemiBold"
+                           VerticalAlignment="Center"
+                           Foreground="{DynamicResource MainWindowPrimaryTextBrush}" />
+                <StackPanel Orientation="Horizontal"
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center">
+                    <Button Width="64"
+                            Height="24"
+                            Margin="0,0,8,0"
+                            Click="RefreshBlockedButton_OnClick"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            Foreground="{DynamicResource MainWindowAccentBrush}"
+                            Cursor="Hand">刷新</Button>
+                    <Button Width="64"
+                            Height="24"
+                            Click="RemoveBlockedButton_OnClick"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            Foreground="{DynamicResource MainWindowDangerBrush}"
+                            Cursor="Hand">删除</Button>
+                </StackPanel>
+            </Grid>
+
+            <Border Grid.Row="1"
+                    CornerRadius="4"
+                    BorderBrush="{DynamicResource MainWindowBorderBrush}"
+                    BorderThickness="1"
+                    Background="{DynamicResource MainWindowPanelBackgroundBrush}"
+                    MaxHeight="120">
+                <ListBox x:Name="BlockedRecentList"
+                         BorderThickness="0"
+                         Background="{DynamicResource MainWindowListBackgroundBrush}"
+                         Foreground="{DynamicResource MainWindowPrimaryTextBrush}">
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem">
+                            <Setter Property="Background" Value="Transparent" />
+                            <Setter Property="BorderThickness" Value="0" />
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                            <Setter Property="Padding" Value="6,4"/>
+                            <Style.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter Property="Background" Value="{DynamicResource MainWindowItemHoverBrush}" />
+                                </Trigger>
+                                <Trigger Property="IsSelected" Value="True">
+                                    <Setter Property="Background" Value="{DynamicResource MainWindowItemSelectedBrush}" />
+                                </Trigger>
+                            </Style.Triggers>
+                        </Style>
+                    </ListBox.ItemContainerStyle>
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="20" />
+                                    <ColumnDefinition Width="4.5*" />
+                                    <ColumnDefinition Width="3*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0"
+                                           x:Name="BlockedIconText"
+                                           FontFamily="Segoe Fluent Icons"
+                                           Text="&#xE7C3;"
+                                           Foreground="{DynamicResource MainWindowItemIconBrush}"
+                                           FontSize="14"
+                                           VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1"
+                                           Text="{Binding DisplayName}"
+                                           FontSize="12"
+                                           Foreground="{DynamicResource MainWindowItemNameBrush}"
+                                           FontWeight="SemiBold"
+                                           VerticalAlignment="Center"
+                                           TextTrimming="CharacterEllipsis"
+                                           Margin="0,0,12,0" />
+                                <TextBlock Grid.Column="2"
+                                           Text="{Binding SecondaryText}"
+                                           FontSize="11"
+                                           Foreground="{DynamicResource MainWindowItemSecondaryBrush}"
+                                           VerticalAlignment="Center"
+                                           TextTrimming="CharacterEllipsis" />
+                                <TextBlock Grid.Column="3"
+                                           Text="{Binding TypeLabel}"
+                                           FontSize="10"
+                                           Foreground="{DynamicResource MainWindowSecondaryTextBrush}"
+                                           VerticalAlignment="Center"
+                                           Margin="8,0,0,0" />
+                            </Grid>
+                            <DataTemplate.Triggers>
+                                <DataTrigger Binding="{Binding IsDirectory}" Value="True">
+                                    <Setter TargetName="BlockedIconText" Property="Text" Value="&#xE8D5;" />
+                                    <Setter TargetName="BlockedIconText" Property="Foreground" Value="{DynamicResource MainWindowFolderIconBrush}" />
+                                </DataTrigger>
+                            </DataTemplate.Triggers>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </Border>
+        </Grid>
+
+        <StackPanel Grid.Row="4"
                     Margin="0,10,0,0">
             <WrapPanel>
                 <CheckBox Margin="0,0,12,4"
@@ -115,7 +245,7 @@
                           Unchecked="MainWindowHotkeyCheckBox_OnUnchecked"
                           x:Name="MainWindowHotkeyCheckBox"
                           FontSize="12"
-                          Foreground="#64748B"
+                          Foreground="{DynamicResource MainWindowSecondaryTextBrush}"
                           Content="启用 Ctrl+Shift+M 唤出主界面" />
                 <CheckBox Margin="0,0,12,4"
                           VerticalAlignment="Center"
@@ -123,7 +253,7 @@
                           Unchecked="AutoJumpExplorerCheckBox_OnUnchecked"
                           x:Name="AutoJumpExplorerCheckBox"
                           FontSize="12"
-                          Foreground="#64748B"
+                          Foreground="{DynamicResource MainWindowSecondaryTextBrush}"
                           Content="浮窗打开自动跳转最近已打开路径" />
                 <CheckBox Margin="0,0,12,4"
                           VerticalAlignment="Center"
@@ -131,11 +261,11 @@
                           Unchecked="AdminStartupCheckBox_OnUnchecked"
                           x:Name="AdminStartupCheckBox"
                           FontSize="12"
-                          Foreground="#64748B"
+                          Foreground="{DynamicResource MainWindowSecondaryTextBrush}"
                           Content="开机自启并提权" />
             </WrapPanel>
             <TextBlock x:Name="EverythingStatusText"
-                       Foreground="#475569" />
+                       Foreground="{DynamicResource MainWindowStatusTextBrush}" />
         </StackPanel>
     </Grid>
 </Window>

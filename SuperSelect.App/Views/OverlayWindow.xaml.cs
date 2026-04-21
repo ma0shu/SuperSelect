@@ -11,6 +11,7 @@ using System.Windows.Threading;
 using SuperSelect.App.Models;
 using SuperSelect.App.Native;
 using SuperSelect.App.Services;
+using MediaColor = System.Windows.Media.Color;
 
 namespace SuperSelect.App.Views;
 
@@ -136,6 +137,56 @@ public partial class OverlayWindow : Window
         UpdateSortButtonLabel();
 
         ShowActivated = false;
+    }
+
+    public void ApplyTheme(bool isDarkMode)
+    {
+        if (isDarkMode)
+        {
+            SetThemeBrush("OverlayWindowBackgroundBrush", MediaColor.FromRgb(0x1E, 0x1E, 0x1E));
+            SetThemeBrush("OverlayBorderBrush", MediaColor.FromRgb(0x3F, 0x3F, 0x46));
+            SetThemeBrush("OverlayPanelBackgroundBrush", MediaColor.FromRgb(0x25, 0x25, 0x26));
+            SetThemeBrush("OverlayPrimaryTextBrush", MediaColor.FromRgb(0xE5, 0xE7, 0xEB));
+            SetThemeBrush("OverlaySecondaryTextBrush", MediaColor.FromRgb(0xA1, 0xA1, 0xAA));
+            SetThemeBrush("OverlayMutedTextBrush", MediaColor.FromRgb(0x71, 0x78, 0x7F));
+            SetThemeBrush("OverlayFolderIconBrush", MediaColor.FromRgb(0xFB, 0xBF, 0x24));
+            SetThemeBrush("OverlayHoverItemBrush", MediaColor.FromRgb(0x2F, 0x31, 0x36));
+            SetThemeBrush("OverlaySelectedItemBrush", MediaColor.FromRgb(0x1E, 0x3A, 0x5F));
+            SetThemeBrush("OverlayIconButtonBrush", MediaColor.FromRgb(0xA1, 0xA1, 0xAA));
+            SetThemeBrush("OverlayIconButtonHoverBrush", MediaColor.FromRgb(0xD4, 0xD4, 0xD8));
+            SetThemeBrush("OverlayIconButtonCheckedBrush", MediaColor.FromRgb(0x60, 0xA5, 0xFA));
+            SetThemeBrush("OverlayScrollThumbBrush", MediaColor.FromRgb(0x71, 0x78, 0x7F));
+            SetThemeBrush("OverlayScrollThumbHoverBrush", MediaColor.FromRgb(0xA1, 0xA1, 0xAA));
+            SetThemeBrush("OverlayScrollThumbDraggingBrush", MediaColor.FromRgb(0xD4, 0xD4, 0xD8));
+            return;
+        }
+
+        SetThemeBrush("OverlayWindowBackgroundBrush", MediaColor.FromRgb(0xF2, 0xF2, 0xF2));
+        SetThemeBrush("OverlayBorderBrush", MediaColor.FromRgb(0xE2, 0xE8, 0xF0));
+        SetThemeBrush("OverlayPanelBackgroundBrush", MediaColor.FromRgb(0xFF, 0xFF, 0xFF));
+        SetThemeBrush("OverlayPrimaryTextBrush", MediaColor.FromRgb(0x1E, 0x29, 0x3B));
+        SetThemeBrush("OverlaySecondaryTextBrush", MediaColor.FromRgb(0x94, 0xA3, 0xB8));
+        SetThemeBrush("OverlayMutedTextBrush", MediaColor.FromRgb(0xCB, 0xD5, 0xE1));
+        SetThemeBrush("OverlayFolderIconBrush", MediaColor.FromRgb(0xFC, 0xD3, 0x4D));
+        SetThemeBrush("OverlayHoverItemBrush", MediaColor.FromRgb(0xF8, 0xFA, 0xFC));
+        SetThemeBrush("OverlaySelectedItemBrush", MediaColor.FromRgb(0xEF, 0xF6, 0xFF));
+        SetThemeBrush("OverlayIconButtonBrush", MediaColor.FromRgb(0x94, 0xA3, 0xB8));
+        SetThemeBrush("OverlayIconButtonHoverBrush", MediaColor.FromRgb(0x64, 0x74, 0x8B));
+        SetThemeBrush("OverlayIconButtonCheckedBrush", MediaColor.FromRgb(0x25, 0x63, 0xEB));
+        SetThemeBrush("OverlayScrollThumbBrush", MediaColor.FromRgb(0x94, 0xA3, 0xB8));
+        SetThemeBrush("OverlayScrollThumbHoverBrush", MediaColor.FromRgb(0x64, 0x74, 0x8B));
+        SetThemeBrush("OverlayScrollThumbDraggingBrush", MediaColor.FromRgb(0x47, 0x55, 0x69));
+    }
+
+    private void SetThemeBrush(string key, MediaColor color)
+    {
+        if (Resources[key] is SolidColorBrush brush)
+        {
+            brush.Color = color;
+            return;
+        }
+
+        Resources[key] = new SolidColorBrush(color);
     }
 
     private void PositionUpdateTimer_OnTick(object? sender, EventArgs e)
@@ -1875,7 +1926,7 @@ public partial class OverlayWindow : Window
 
     private void ResultList_OnContextMenuOpening(object sender, ContextMenuEventArgs e)
     {
-        if (_currentMode != OverlayMode.Tray)
+        if (_currentMode is not OverlayMode.Tray and not OverlayMode.Recent)
         {
             e.Handled = true;
         }
@@ -1885,10 +1936,29 @@ public partial class OverlayWindow : Window
     {
         if (sender is ListBoxItem { DataContext: FileCandidate candidate } item)
         {
-            if (_currentMode == OverlayMode.Tray && item.ContextMenu is { } menu)
+            if (_currentMode == OverlayMode.Tray)
             {
-                menu.PlacementTarget = item;
-                menu.IsOpen = true;
+                if (ResultList.Resources["TrayContextMenu"] is ContextMenu trayMenu)
+                {
+                    trayMenu.PlacementTarget = item;
+                    trayMenu.DataContext = candidate;
+                    trayMenu.IsOpen = true;
+                }
+            }
+            else if (_currentMode == OverlayMode.Recent)
+            {
+                if (ResultList.Resources["RecentContextMenu"] is ContextMenu recentMenu)
+                {
+                    recentMenu.PlacementTarget = item;
+                    recentMenu.DataContext = candidate;
+
+                    if (recentMenu.Items.OfType<MenuItem>().FirstOrDefault() is MenuItem blockFileItem)
+                    {
+                        blockFileItem.IsEnabled = !candidate.IsDirectory;
+                    }
+
+                    recentMenu.IsOpen = true;
+                }
             }
             else
             {
@@ -2053,6 +2123,52 @@ public partial class OverlayWindow : Window
             menuItem.DataContext is FileCandidate candidate)
         {
             _trayRepository.PinToTop(candidate.FullPath);
+            RequestCandidatesRefresh();
+        }
+    }
+
+    private void RecentMenuItem_BlockFile_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { DataContext: FileCandidate candidate } || candidate.IsDirectory)
+        {
+            return;
+        }
+
+        var blocked = _everythingService.BlockRecentFile(candidate.FullPath);
+        SetStatus(blocked
+            ? $"已屏蔽最近文件：{candidate.DisplayName}"
+            : "该文件已在屏蔽列表中。");
+
+        if (_currentMode == OverlayMode.Recent)
+        {
+            RequestCandidatesRefresh();
+        }
+    }
+
+    private void RecentMenuItem_BlockDirectory_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { DataContext: FileCandidate candidate })
+        {
+            return;
+        }
+
+        var directory = candidate.IsDirectory
+            ? candidate.FullPath
+            : (Path.GetDirectoryName(candidate.FullPath) ?? string.Empty);
+
+        if (string.IsNullOrWhiteSpace(directory))
+        {
+            SetStatus("无法识别可屏蔽目录。");
+            return;
+        }
+
+        var blocked = _everythingService.BlockRecentDirectory(directory);
+        SetStatus(blocked
+            ? $"已屏蔽最近目录：{directory}"
+            : "该目录已在屏蔽列表中。");
+
+        if (_currentMode == OverlayMode.Recent)
+        {
             RequestCandidatesRefresh();
         }
     }

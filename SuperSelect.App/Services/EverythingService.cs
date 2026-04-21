@@ -1,19 +1,41 @@
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using SuperSelect.App.Models;
 
 namespace SuperSelect.App.Services;
 
 internal sealed class EverythingService
 {
+    internal readonly record struct RecentBlockEntry(string FullPath, bool IsDirectory);
+
+    private sealed class RecentBlocklistPayload
+    {
+        public List<string> Files { get; set; } = [];
+        public List<string> Directories { get; set; } = [];
+    }
+
     private readonly object _syncRoot = new();
+    private readonly string _recentBlocklistPath;
     private static readonly TimeSpan AvailabilityProbeInterval = TimeSpan.FromMilliseconds(500);
     private bool _isAvailable = true;
     private string _lastErrorMessage = string.Empty;
     private DateTime _lastAvailabilityProbeUtc = DateTime.MinValue;
+    private HashSet<string> _blockedRecentFiles = new(StringComparer.OrdinalIgnoreCase);
+    private HashSet<string> _blockedRecentDirectories = new(StringComparer.OrdinalIgnoreCase);
     [ThreadStatic]
     private static StringBuilder? _threadPathBuilder;
+
+    public EverythingService()
+    {
+        var storeDirectory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "SuperSelect");
+        Directory.CreateDirectory(storeDirectory);
+        _recentBlocklistPath = Path.Combine(storeDirectory, "recent-blocklist.json");
+        LoadRecentBlocklist();
+    }
 
     public bool IsAvailable
     {
@@ -81,8 +103,9 @@ internal sealed class EverythingService
         int maxResults,
         CancellationToken cancellationToken)
     {
+        var query = BuildRecentQuery("file:");
         return Task.Run(
-            () => QueryInternal("file:", ToEverythingSort(sortOption), maxResults, isDirectoryResult: false, CandidateSource.EverythingRecent, cancellationToken),
+            () => QueryInternal(query, ToEverythingSort(sortOption), maxResults, isDirectoryResult: false, CandidateSource.EverythingRecent, cancellationToken),
             cancellationToken);
     }
 
@@ -91,8 +114,9 @@ internal sealed class EverythingService
         int maxResults,
         CancellationToken cancellationToken)
     {
+        var query = BuildRecentQuery("folder:");
         return Task.Run(
-            () => QueryInternal("folder:", ToEverythingSort(sortOption), maxResults, isDirectoryResult: true, CandidateSource.EverythingRecent, cancellationToken),
+            () => QueryInternal(query, ToEverythingSort(sortOption), maxResults, isDirectoryResult: true, CandidateSource.EverythingRecent, cancellationToken),
             cancellationToken);
     }
 
@@ -125,9 +149,10 @@ internal sealed class EverythingService
         IReadOnlySet<string> allowedExtensions,
         CancellationToken cancellationToken)
     {
+        var query = BuildRecentQuery("file:");
         return Task.Run(
             () => QueryPageFilteredInternal(
-                "file:",
+                query,
                 ToEverythingSort(sortOption),
                 offset,
                 pageSize,
@@ -137,12 +162,148 @@ internal sealed class EverythingService
             cancellationToken);
     }
 
+    public bool BlockRecentFile(string fullPath)
+    {
+        var normalized = NormalizePath(fullPath);
+        if (normalized is null)
+        {
+            return false;
+        }
+
+        lock (_syncRoot)
+        {
+            if (!_blockedRecentFiles.Add(normalized))
+            {
+                return false;
+            }
+
+            SaveRecentBlocklistLocked();
+            return true;
+        }
+    }
+
+    public bool BlockRecentDirectory(string directoryPath)
+    {
+        var normalized = NormalizePath(directoryPath);
+        if (normalized is null)
+        {
+            return false;
+        }
+
+        lock (_syncRoot)
+        {
+            if (!_blockedRecentDirectories.Add(normalized))
+            {
+                return false;
+            }
+
+            SaveRecentBlocklistLocked();
+            return true;
+        }
+    }
+
+    public IReadOnlyList<RecentBlockEntry> GetRecentBlockEntries()
+    {
+        lock (_syncRoot)
+        {
+            var result = new List<RecentBlockEntry>(_blockedRecentFiles.Count + _blockedRecentDirectories.Count);
+
+            foreach (var directory in _blockedRecentDirectories.Order(StringComparer.OrdinalIgnoreCase))
+            {
+                result.Add(new RecentBlockEntry(directory, IsDirectory: true));
+            }
+
+            foreach (var file in _blockedRecentFiles.Order(StringComparer.OrdinalIgnoreCase))
+            {
+                result.Add(new RecentBlockEntry(file, IsDirectory: false));
+            }
+
+            return result;
+        }
+    }
+
+    public bool UnblockRecentFile(string fullPath)
+    {
+        var normalized = NormalizePath(fullPath);
+        if (normalized is null)
+        {
+            return false;
+        }
+
+        lock (_syncRoot)
+        {
+            if (!_blockedRecentFiles.Remove(normalized))
+            {
+                return false;
+            }
+
+            SaveRecentBlocklistLocked();
+            return true;
+        }
+    }
+
+    public bool UnblockRecentDirectory(string directoryPath)
+    {
+        var normalized = NormalizePath(directoryPath);
+        if (normalized is null)
+        {
+            return false;
+        }
+
+        lock (_syncRoot)
+        {
+            if (!_blockedRecentDirectories.Remove(normalized))
+            {
+                return false;
+            }
+
+            SaveRecentBlocklistLocked();
+            return true;
+        }
+    }
+
     private static string BuildSearchQuery(bool isDirectoryQuery, string keyword)
     {
         var prefix = isDirectoryQuery ? "folder:" : "file:";
         return string.IsNullOrWhiteSpace(keyword)
             ? prefix
             : $"{prefix} {keyword.Trim()}";
+    }
+
+    private string BuildRecentQuery(string baseQuery)
+    {
+        List<string> blockedFiles;
+        List<string> blockedDirectories;
+        lock (_syncRoot)
+        {
+            blockedFiles = _blockedRecentFiles.ToList();
+            blockedDirectories = _blockedRecentDirectories.ToList();
+        }
+
+        if (blockedFiles.Count == 0 && blockedDirectories.Count == 0)
+        {
+            return baseQuery;
+        }
+
+        var builder = new StringBuilder(baseQuery);
+
+        for (var i = 0; i < blockedFiles.Count; i++)
+        {
+            builder.Append(' ');
+            builder.Append("!path:\"");
+            builder.Append(blockedFiles[i]);
+            builder.Append('"');
+        }
+
+        for (var i = 0; i < blockedDirectories.Count; i++)
+        {
+            builder.Append(' ');
+            builder.Append("!path:\"");
+            builder.Append(EnsureTrailingDirectorySeparator(blockedDirectories[i]));
+            builder.Append('"');
+        }
+
+        return builder.ToString();
     }
 
     private IReadOnlyList<FileCandidate> QueryInternal(
@@ -459,6 +620,94 @@ internal sealed class EverythingService
         }
 
         return allowedExtensions.Contains(extension);
+    }
+
+    private static string EnsureTrailingDirectorySeparator(string directoryPath)
+    {
+        if (string.IsNullOrWhiteSpace(directoryPath))
+        {
+            return directoryPath;
+        }
+
+        return directoryPath.EndsWith(Path.DirectorySeparatorChar) ||
+               directoryPath.EndsWith(Path.AltDirectorySeparatorChar)
+            ? directoryPath
+            : directoryPath + Path.DirectorySeparatorChar;
+    }
+
+    private static string? NormalizePath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return null;
+        }
+
+        try
+        {
+            var normalized = Path.GetFullPath(path.Trim().Trim('"'));
+            return normalized;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private void LoadRecentBlocklist()
+    {
+        try
+        {
+            if (!File.Exists(_recentBlocklistPath))
+            {
+                return;
+            }
+
+            var payload = JsonSerializer.Deserialize<RecentBlocklistPayload>(File.ReadAllText(_recentBlocklistPath));
+            if (payload is null)
+            {
+                return;
+            }
+
+            lock (_syncRoot)
+            {
+                _blockedRecentFiles = new HashSet<string>(
+                    payload.Files
+                        .Select(NormalizePath)
+                        .Where(static p => !string.IsNullOrWhiteSpace(p))!
+                        .Select(static p => p!),
+                    StringComparer.OrdinalIgnoreCase);
+
+                _blockedRecentDirectories = new HashSet<string>(
+                    payload.Directories
+                        .Select(NormalizePath)
+                        .Where(static p => !string.IsNullOrWhiteSpace(p))!
+                        .Select(static p => p!),
+                    StringComparer.OrdinalIgnoreCase);
+            }
+        }
+        catch
+        {
+            // Ignore malformed blocklist and continue with empty sets.
+        }
+    }
+
+    private void SaveRecentBlocklistLocked()
+    {
+        try
+        {
+            var payload = new RecentBlocklistPayload
+            {
+                Files = _blockedRecentFiles.Order(StringComparer.OrdinalIgnoreCase).ToList(),
+                Directories = _blockedRecentDirectories.Order(StringComparer.OrdinalIgnoreCase).ToList(),
+            };
+
+            var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(_recentBlocklistPath, json);
+        }
+        catch
+        {
+            // Ignore persistence failure.
+        }
     }
 
     private bool EnsureAvailableLocked()

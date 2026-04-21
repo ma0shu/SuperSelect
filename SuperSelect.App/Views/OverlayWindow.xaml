@@ -9,7 +9,7 @@
         ResizeMode="NoResize"
         AllowsTransparency="False"
         AllowDrop="True"
-        Background="#F2F2F2"
+        Background="{DynamicResource OverlayWindowBackgroundBrush}"
         Width="900"
         SizeToContent="Height"
         MaxHeight="216"
@@ -19,13 +19,29 @@
         PreviewDragOver="Window_OnPreviewDragOver"
         PreviewDrop="Window_OnPreviewDrop">
     <Window.Resources>
+        <SolidColorBrush x:Key="OverlayWindowBackgroundBrush" Color="#F2F2F2" />
+        <SolidColorBrush x:Key="OverlayBorderBrush" Color="#E2E8F0" />
+        <SolidColorBrush x:Key="OverlayPanelBackgroundBrush" Color="#FFFFFF" />
+        <SolidColorBrush x:Key="OverlayPrimaryTextBrush" Color="#1E293B" />
+        <SolidColorBrush x:Key="OverlaySecondaryTextBrush" Color="#94A3B8" />
+        <SolidColorBrush x:Key="OverlayMutedTextBrush" Color="#CBD5E1" />
+        <SolidColorBrush x:Key="OverlayFolderIconBrush" Color="#FCD34D" />
+        <SolidColorBrush x:Key="OverlayHoverItemBrush" Color="#F8FAFC" />
+        <SolidColorBrush x:Key="OverlaySelectedItemBrush" Color="#EFF6FF" />
+        <SolidColorBrush x:Key="OverlayIconButtonBrush" Color="#94A3B8" />
+        <SolidColorBrush x:Key="OverlayIconButtonHoverBrush" Color="#64748B" />
+        <SolidColorBrush x:Key="OverlayIconButtonCheckedBrush" Color="#2563EB" />
+        <SolidColorBrush x:Key="OverlayScrollThumbBrush" Color="#94A3B8" />
+        <SolidColorBrush x:Key="OverlayScrollThumbHoverBrush" Color="#64748B" />
+        <SolidColorBrush x:Key="OverlayScrollThumbDraggingBrush" Color="#475569" />
+
         <Style x:Key="IconToggleButtonStyle" TargetType="ToggleButton">
             <Setter Property="Width" Value="28" />
             <Setter Property="Height" Value="28" />
             <Setter Property="Margin" Value="2,0,0,0" />
             <Setter Property="FontFamily" Value="Segoe Fluent Icons" />
             <Setter Property="FontSize" Value="16" />
-            <Setter Property="Foreground" Value="#94A3B8" />
+            <Setter Property="Foreground" Value="{DynamicResource OverlayIconButtonBrush}" />
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderThickness" Value="0" />
             <Setter Property="Cursor" Value="Hand" />
@@ -37,10 +53,10 @@
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter Property="Foreground" Value="#64748B" />
+                                <Setter Property="Foreground" Value="{DynamicResource OverlayIconButtonHoverBrush}" />
                             </Trigger>
                             <Trigger Property="IsChecked" Value="True">
-                                <Setter Property="Foreground" Value="#2563EB" />
+                                <Setter Property="Foreground" Value="{DynamicResource OverlayIconButtonCheckedBrush}" />
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -52,7 +68,7 @@
             <Setter Property="Height" Value="28" />
             <Setter Property="MinWidth" Value="28" />
             <Setter Property="Margin" Value="2,0,0,0" />
-            <Setter Property="Foreground" Value="#94A3B8" />
+            <Setter Property="Foreground" Value="{DynamicResource OverlayIconButtonBrush}" />
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderThickness" Value="0" />
             <Setter Property="Cursor" Value="Hand" />
@@ -64,7 +80,7 @@
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter Property="Foreground" Value="#64748B" />
+                                <Setter Property="Foreground" Value="{DynamicResource OverlayIconButtonHoverBrush}" />
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -73,7 +89,7 @@
         </Style>
 
         <Style x:Key="SlimScrollThumbStyle" TargetType="Thumb">
-            <Setter Property="Background" Value="#94A3B8" />
+            <Setter Property="Background" Value="{DynamicResource OverlayScrollThumbBrush}" />
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Thumb">
@@ -83,10 +99,10 @@
             </Setter>
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Background" Value="#64748B" />
+                    <Setter Property="Background" Value="{DynamicResource OverlayScrollThumbHoverBrush}" />
                 </Trigger>
                 <Trigger Property="IsDragging" Value="True">
-                    <Setter Property="Background" Value="#475569" />
+                    <Setter Property="Background" Value="{DynamicResource OverlayScrollThumbDraggingBrush}" />
                 </Trigger>
             </Style.Triggers>
         </Style>
@@ -133,10 +149,10 @@
             Margin="0"
             CornerRadius="0"
             BorderThickness="1,0,1,1"
-            BorderBrush="#E2E8F0"
+            BorderBrush="{DynamicResource OverlayBorderBrush}"
             Padding="4,4,4,4"
             AllowDrop="True"
-            Background="#F2F2F2"
+            Background="{DynamicResource OverlayWindowBackgroundBrush}"
             PreviewDragOver="Window_OnPreviewDragOver"
             PreviewDrop="Window_OnPreviewDrop">
         <Grid>
@@ -157,13 +173,14 @@
                         Height="28"
                         CornerRadius="4"
                         BorderThickness="1"
-                        BorderBrush="#E2E8F0"
-                        Background="#FFFFFF">
+                        BorderBrush="{DynamicResource OverlayBorderBrush}"
+                        Background="{DynamicResource OverlayPanelBackgroundBrush}">
                     <TextBox x:Name="SearchBox"
                              Padding="8,0"
                              FontSize="12"
                              VerticalContentAlignment="Center"
                              BorderThickness="0"
+                             Foreground="{DynamicResource OverlayPrimaryTextBrush}"
                              Background="Transparent"
                              TextChanged="SearchBox_OnTextChanged"
                              PreviewKeyDown="SearchBox_OnPreviewKeyDown" />
@@ -210,7 +227,7 @@
                        Grid.Row="1"
                        Margin="2,4,2,0"
                        FontSize="11"
-                       Foreground="#94A3B8"
+                       Foreground="{DynamicResource OverlaySecondaryTextBrush}"
                        Text="输入关键字搜索，或拖文件到此面板加入托盘。"
                        TextTrimming="CharacterEllipsis" />
 
@@ -219,15 +236,17 @@
                     Margin="0,4,0,0"
                     VerticalAlignment="Top"
                     CornerRadius="4"
-                    BorderBrush="#E2E8F0"
+                    BorderBrush="{DynamicResource OverlayBorderBrush}"
                     BorderThickness="1"
-                    Background="#FFFFFF"
+                    Background="{DynamicResource OverlayPanelBackgroundBrush}"
                     Visibility="Collapsed">
                 <Grid>
                     <ListBox x:Name="ResultList"
                              Margin="0"
                              Padding="0"
                              BorderThickness="0"
+                             Background="{DynamicResource OverlayPanelBackgroundBrush}"
+                             Foreground="{DynamicResource OverlayPrimaryTextBrush}"
                              ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                              ScrollViewer.VerticalScrollBarVisibility="Auto"
                              ScrollViewer.CanContentScroll="True"
@@ -243,10 +262,13 @@
                                 <MenuItem Header="置顶" Click="TrayMenuItem_Pin_OnClick" />
                                 <MenuItem Header="删除" Click="TrayMenuItem_Delete_OnClick" />
                             </ContextMenu>
+                            <ContextMenu x:Key="RecentContextMenu" DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                                <MenuItem x:Name="RecentBlockFileMenuItem" Header="屏蔽此文件" Click="RecentMenuItem_BlockFile_OnClick" />
+                                <MenuItem Header="屏蔽此目录" Click="RecentMenuItem_BlockDirectory_OnClick" />
+                            </ContextMenu>
                         </ListBox.Resources>
                         <ListBox.ItemContainerStyle>
                             <Style TargetType="ListBoxItem">
-                                <Setter Property="ContextMenu" Value="{StaticResource TrayContextMenu}" />
                                 <Setter Property="Background" Value="Transparent" />
                                 <Setter Property="BorderBrush" Value="Transparent" />
                                 <Setter Property="BorderThickness" Value="0" />
@@ -256,10 +278,10 @@
                                 <EventSetter Event="PreviewMouseLeftButtonUp" Handler="ListBoxItem_PreviewMouseLeftButtonUp" />
                                 <Style.Triggers>
                                     <Trigger Property="IsMouseOver" Value="True">
-                                        <Setter Property="Background" Value="#F8FAFC" />
+                                        <Setter Property="Background" Value="{DynamicResource OverlayHoverItemBrush}" />
                                     </Trigger>
                                     <Trigger Property="IsSelected" Value="True">
-                                        <Setter Property="Background" Value="#EFF6FF" />
+                                        <Setter Property="Background" Value="{DynamicResource OverlaySelectedItemBrush}" />
                                     </Trigger>
                                 </Style.Triggers>
                             </Style>
@@ -278,14 +300,14 @@
                                                x:Name="IconText"
                                                FontFamily="Segoe Fluent Icons"
                                                Text="&#xE7C3;"
-                                               Foreground="#94A3B8"
+                                               Foreground="{DynamicResource OverlaySecondaryTextBrush}"
                                                FontSize="14"
                                                VerticalAlignment="Center" />
 
                                     <TextBlock Grid.Column="1"
                                                Text="{Binding DisplayName}"
                                                FontSize="12"
-                                               Foreground="#1E293B"
+                                               Foreground="{DynamicResource OverlayPrimaryTextBrush}"
                                                FontWeight="SemiBold"
                                                VerticalAlignment="Center"
                                                TextTrimming="CharacterEllipsis"
@@ -294,7 +316,7 @@
                                     <TextBlock Grid.Column="2"
                                                Text="{Binding SecondaryText}"
                                                FontSize="11"
-                                               Foreground="#94A3B8"
+                                               Foreground="{DynamicResource OverlaySecondaryTextBrush}"
                                                VerticalAlignment="Center"
                                                TextTrimming="CharacterEllipsis"
                                                Margin="0,0,12,0" />
@@ -302,14 +324,14 @@
                                     <TextBlock Grid.Column="3"
                                                Text="{Binding SourceLabel}"
                                                FontSize="10"
-                                               Foreground="#CBD5E1"
+                                               Foreground="{DynamicResource OverlayMutedTextBrush}"
                                                HorizontalAlignment="Right"
                                                VerticalAlignment="Center" />
                                 </Grid>
                                 <DataTemplate.Triggers>
                                     <DataTrigger Binding="{Binding IsDirectory}" Value="True">
                                         <Setter TargetName="IconText" Property="Text" Value="&#xE8D5;" />
-                                        <Setter TargetName="IconText" Property="Foreground" Value="#FCD34D" />
+                                        <Setter TargetName="IconText" Property="Foreground" Value="{DynamicResource OverlayFolderIconBrush}" />
                                     </DataTrigger>
                                 </DataTemplate.Triggers>
                             </DataTemplate>
@@ -322,7 +344,7 @@
                        Grid.Row="3"
                        Margin="2,1,4,0"
                        FontSize="11"
-                       Foreground="#94A3B8"
+                       Foreground="{DynamicResource OverlaySecondaryTextBrush}"
                        HorizontalAlignment="Right"
                        Visibility="Collapsed" />
         </Grid>

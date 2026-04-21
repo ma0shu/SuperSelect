@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.IO;
 using System.Runtime.InteropServices;
+using Microsoft.Win32;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Interop;
@@ -17,6 +18,7 @@ public partial class App : System.Windows.Application
     private AppTrayIcon? _trayIcon;
     private HwndSource? _hotkeySource;
     private bool _isExitRequested;
+    private bool _isSystemDarkMode;
     private DispatcherTimer? _dialogDetachDebounceTimer;
     private IntPtr _activeDialogHwnd;
 
@@ -67,6 +69,9 @@ public partial class App : System.Windows.Application
         _trayIcon.OpenRequested += OnTrayOpenRequested;
         _trayIcon.ExitRequested += OnTrayExitRequested;
 
+        SystemEvents.UserPreferenceChanged += OnSystemUserPreferenceChanged;
+        ApplySystemTheme();
+
         if (_preferencesRepository.MainWindowHotkeyEnabled)
         {
             InitializeGlobalHotkey();
@@ -79,6 +84,7 @@ public partial class App : System.Windows.Application
         DispatcherUnhandledException -= OnDispatcherUnhandledException;
         AppDomain.CurrentDomain.UnhandledException -= OnAppDomainUnhandledException;
         TaskScheduler.UnobservedTaskException -= OnTaskSchedulerUnobservedTaskException;
+        SystemEvents.UserPreferenceChanged -= OnSystemUserPreferenceChanged;
 
         DisposeTrayIcon();
         DisposeGlobalHotkey();
@@ -232,9 +238,36 @@ public partial class App : System.Windows.Application
         }
 
         var created = new MainWindow(watcher, everythingService, trayRepository, preferencesRepository);
+        created.ApplyTheme(_isSystemDarkMode);
         created.Closed += MainWindow_OnClosed;
         MainWindow = created;
         return created;
+    }
+
+    private void OnSystemUserPreferenceChanged(object? sender, UserPreferenceChangedEventArgs e)
+    {
+        if (_isExitRequested)
+        {
+            return;
+        }
+
+        if (e.Category is not UserPreferenceCategory.Color and not UserPreferenceCategory.General and not UserPreferenceCategory.VisualStyle)
+        {
+            return;
+        }
+
+        _ = Dispatcher.BeginInvoke(new Action(ApplySystemTheme));
+    }
+
+    private void ApplySystemTheme()
+    {
+        var darkMode = SystemThemeHelper.IsSystemAppDarkMode();
+        _isSystemDarkMode = darkMode;
+        _overlayWindow?.ApplyTheme(darkMode);
+        if (MainWindow is MainWindow mainWindow)
+        {
+            mainWindow.ApplyTheme(darkMode);
+        }
     }
 
     private void ExitApplication()

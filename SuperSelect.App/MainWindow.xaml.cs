@@ -1,17 +1,30 @@
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Windows;
+using System.Windows.Media;
 using SuperSelect.App.Models;
 using SuperSelect.App.Services;
+using MediaColor = System.Windows.Media.Color;
 
 namespace SuperSelect.App;
 
 public partial class MainWindow : Window
 {
+    private sealed class BlockedRecentItem
+    {
+        public required string FullPath { get; init; }
+        public required string DisplayName { get; init; }
+        public string SecondaryText { get; init; } = string.Empty;
+        public bool IsDirectory { get; init; }
+        public string TypeLabel => IsDirectory ? "目录" : "文件";
+    }
+
     private readonly WinEventFileDialogWatcher _watcher;
     private readonly EverythingService _everythingService;
     private readonly TrayRepository _trayRepository;
     private readonly UserPreferencesRepository _preferencesRepository;
     private readonly ObservableCollection<FileCandidate> _trayItems = [];
+    private readonly ObservableCollection<BlockedRecentItem> _blockedRecentItems = [];
     private bool _isUpdatingUi;
 
     internal MainWindow(
@@ -28,7 +41,60 @@ public partial class MainWindow : Window
         _preferencesRepository = preferencesRepository;
 
         TrayList.ItemsSource = _trayItems;
+        BlockedRecentList.ItemsSource = _blockedRecentItems;
         RefreshUi();
+    }
+
+    internal void ApplyTheme(bool isDarkMode)
+    {
+        if (isDarkMode)
+        {
+            SetThemeBrush("MainWindowWindowBackgroundBrush", MediaColor.FromRgb(0x1E, 0x1E, 0x1E));
+            SetThemeBrush("MainWindowPanelBackgroundBrush", MediaColor.FromRgb(0x25, 0x25, 0x26));
+            SetThemeBrush("MainWindowListBackgroundBrush", MediaColor.FromRgb(0x25, 0x25, 0x26));
+            SetThemeBrush("MainWindowBorderBrush", MediaColor.FromRgb(0x3F, 0x3F, 0x46));
+            SetThemeBrush("MainWindowPrimaryTextBrush", MediaColor.FromRgb(0xE5, 0xE7, 0xEB));
+            SetThemeBrush("MainWindowSecondaryTextBrush", MediaColor.FromRgb(0xA1, 0xA1, 0xAA));
+            SetThemeBrush("MainWindowStatusTextBrush", MediaColor.FromRgb(0xC4, 0xC4, 0xCC));
+            SetThemeBrush("MainWindowWarningBrush", MediaColor.FromRgb(0xF8, 0x71, 0x71));
+            SetThemeBrush("MainWindowAccentBrush", MediaColor.FromRgb(0x60, 0xA5, 0xFA));
+            SetThemeBrush("MainWindowDangerBrush", MediaColor.FromRgb(0xF8, 0x71, 0x71));
+            SetThemeBrush("MainWindowItemIconBrush", MediaColor.FromRgb(0xA1, 0xA1, 0xAA));
+            SetThemeBrush("MainWindowItemNameBrush", MediaColor.FromRgb(0xE5, 0xE7, 0xEB));
+            SetThemeBrush("MainWindowItemSecondaryBrush", MediaColor.FromRgb(0x9C, 0xA3, 0xAF));
+            SetThemeBrush("MainWindowItemHoverBrush", MediaColor.FromRgb(0x2F, 0x31, 0x36));
+            SetThemeBrush("MainWindowItemSelectedBrush", MediaColor.FromRgb(0x1E, 0x3A, 0x5F));
+            SetThemeBrush("MainWindowFolderIconBrush", MediaColor.FromRgb(0xFB, 0xBF, 0x24));
+            return;
+        }
+
+        SetThemeBrush("MainWindowWindowBackgroundBrush", MediaColor.FromRgb(0xF4, 0xF6, 0xF8));
+        SetThemeBrush("MainWindowPanelBackgroundBrush", MediaColor.FromRgb(0xFF, 0xFF, 0xFF));
+        SetThemeBrush("MainWindowListBackgroundBrush", MediaColor.FromRgb(0xFF, 0xFF, 0xFF));
+        SetThemeBrush("MainWindowBorderBrush", MediaColor.FromRgb(0xE2, 0xE8, 0xF0));
+        SetThemeBrush("MainWindowPrimaryTextBrush", MediaColor.FromRgb(0x33, 0x41, 0x55));
+        SetThemeBrush("MainWindowSecondaryTextBrush", MediaColor.FromRgb(0x64, 0x74, 0x8B));
+        SetThemeBrush("MainWindowStatusTextBrush", MediaColor.FromRgb(0x47, 0x55, 0x69));
+        SetThemeBrush("MainWindowWarningBrush", MediaColor.FromRgb(0xEF, 0x44, 0x44));
+        SetThemeBrush("MainWindowAccentBrush", MediaColor.FromRgb(0x25, 0x63, 0xEB));
+        SetThemeBrush("MainWindowDangerBrush", MediaColor.FromRgb(0xEF, 0x44, 0x44));
+        SetThemeBrush("MainWindowItemIconBrush", MediaColor.FromRgb(0x94, 0xA3, 0xB8));
+        SetThemeBrush("MainWindowItemNameBrush", MediaColor.FromRgb(0x1E, 0x29, 0x3B));
+        SetThemeBrush("MainWindowItemSecondaryBrush", MediaColor.FromRgb(0x94, 0xA3, 0xB8));
+        SetThemeBrush("MainWindowItemHoverBrush", MediaColor.FromRgb(0xF8, 0xFA, 0xFC));
+        SetThemeBrush("MainWindowItemSelectedBrush", MediaColor.FromRgb(0xEF, 0xF6, 0xFF));
+        SetThemeBrush("MainWindowFolderIconBrush", MediaColor.FromRgb(0xFC, 0xD3, 0x4D));
+    }
+
+    private void SetThemeBrush(string key, MediaColor color)
+    {
+        if (Resources[key] is SolidColorBrush brush)
+        {
+            brush.Color = color;
+            return;
+        }
+
+        Resources[key] = new SolidColorBrush(color);
     }
 
     protected override void OnActivated(EventArgs e)
@@ -62,6 +128,7 @@ public partial class MainWindow : Window
             : $"Everything 状态：不可用 - {_everythingService.LastErrorMessage}{Environment.NewLine}日志目录：{AppLogger.LogDirectoryPath}";
 
         RefreshTrayList();
+        RefreshBlockedRecentList();
     }
 
     private void AdminStartupCheckBox_OnChecked(object sender, RoutedEventArgs e)
@@ -179,9 +246,51 @@ public partial class MainWindow : Window
         }
     }
 
+    private void RefreshBlockedRecentList()
+    {
+        _blockedRecentItems.Clear();
+        foreach (var entry in _everythingService.GetRecentBlockEntries())
+        {
+            var pathForDisplay = entry.IsDirectory
+                ? Path.TrimEndingDirectorySeparator(entry.FullPath)
+                : entry.FullPath;
+            var displayName = Path.GetFileName(pathForDisplay);
+            if (string.IsNullOrWhiteSpace(displayName))
+            {
+                displayName = pathForDisplay;
+            }
+
+            _blockedRecentItems.Add(new BlockedRecentItem
+            {
+                FullPath = entry.FullPath,
+                DisplayName = displayName,
+                SecondaryText = Path.GetDirectoryName(pathForDisplay) ?? string.Empty,
+                IsDirectory = entry.IsDirectory,
+            });
+        }
+    }
+
     private void RefreshButton_OnClick(object sender, RoutedEventArgs e)
     {
         RefreshUi();
+    }
+
+    private void RefreshBlockedButton_OnClick(object sender, RoutedEventArgs e)
+    {
+        RefreshBlockedRecentList();
+    }
+
+    private void RemoveBlockedButton_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (BlockedRecentList.SelectedItem is not BlockedRecentItem item)
+        {
+            return;
+        }
+
+        _ = item.IsDirectory
+            ? _everythingService.UnblockRecentDirectory(item.FullPath)
+            : _everythingService.UnblockRecentFile(item.FullPath);
+        RefreshBlockedRecentList();
     }
 
     private void RemoveButton_OnClick(object sender, RoutedEventArgs e)
