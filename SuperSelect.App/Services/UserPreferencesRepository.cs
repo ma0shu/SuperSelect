@@ -8,6 +8,8 @@ internal sealed class UserPreferencesRepository
     private sealed class SettingsPayload
     {
         public bool TypeFilterEnabled { get; set; }
+        public bool AutoJumpToExplorerOnAttachEnabled { get; set; }
+        public bool MainWindowHotkeyEnabled { get; set; } = true;
     }
 
     private readonly object _syncRoot = new();
@@ -36,6 +38,28 @@ internal sealed class UserPreferencesRepository
         }
     }
 
+    public bool AutoJumpToExplorerOnAttachEnabled
+    {
+        get
+        {
+            lock (_syncRoot)
+            {
+                return _payload.AutoJumpToExplorerOnAttachEnabled;
+            }
+        }
+    }
+
+    public bool MainWindowHotkeyEnabled
+    {
+        get
+        {
+            lock (_syncRoot)
+            {
+                return _payload.MainWindowHotkeyEnabled;
+            }
+        }
+    }
+
     public void SetTypeFilterEnabled(bool enabled)
     {
         lock (_syncRoot)
@@ -46,6 +70,34 @@ internal sealed class UserPreferencesRepository
             }
 
             _payload.TypeFilterEnabled = enabled;
+            SaveLocked();
+        }
+    }
+
+    public void SetAutoJumpToExplorerOnAttachEnabled(bool enabled)
+    {
+        lock (_syncRoot)
+        {
+            if (_payload.AutoJumpToExplorerOnAttachEnabled == enabled)
+            {
+                return;
+            }
+
+            _payload.AutoJumpToExplorerOnAttachEnabled = enabled;
+            SaveLocked();
+        }
+    }
+
+    public void SetMainWindowHotkeyEnabled(bool enabled)
+    {
+        lock (_syncRoot)
+        {
+            if (_payload.MainWindowHotkeyEnabled == enabled)
+            {
+                return;
+            }
+
+            _payload.MainWindowHotkeyEnabled = enabled;
             SaveLocked();
         }
     }

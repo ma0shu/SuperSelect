@@ -10,19 +10,22 @@ public partial class MainWindow : Window
     private readonly WinEventFileDialogWatcher _watcher;
     private readonly EverythingService _everythingService;
     private readonly TrayRepository _trayRepository;
+    private readonly UserPreferencesRepository _preferencesRepository;
     private readonly ObservableCollection<FileCandidate> _trayItems = [];
-    private bool _isUpdatingAdminStartupUi;
+    private bool _isUpdatingUi;
 
     internal MainWindow(
         WinEventFileDialogWatcher watcher,
         EverythingService everythingService,
-        TrayRepository trayRepository)
+        TrayRepository trayRepository,
+        UserPreferencesRepository preferencesRepository)
     {
         InitializeComponent();
 
         _watcher = watcher;
         _everythingService = everythingService;
         _trayRepository = trayRepository;
+        _preferencesRepository = preferencesRepository;
 
         TrayList.ItemsSource = _trayItems;
         RefreshUi();
@@ -45,12 +48,14 @@ public partial class MainWindow : Window
 
         AdminWarningText.Visibility = isAdmin ? Visibility.Collapsed : Visibility.Visible;
 
-        _isUpdatingAdminStartupUi = true;
+        _isUpdatingUi = true;
         AdminStartupCheckBox.IsChecked = isConfigured;
         AdminStartupCheckBox.Content = isConfigured
             ? "开机自启并提权（已启用）"
             : "开机自启并提权（免弹窗）";
-        _isUpdatingAdminStartupUi = false;
+        MainWindowHotkeyCheckBox.IsChecked = _preferencesRepository.MainWindowHotkeyEnabled;
+        AutoJumpExplorerCheckBox.IsChecked = _preferencesRepository.AutoJumpToExplorerOnAttachEnabled;
+        _isUpdatingUi = false;
 
         EverythingStatusText.Text = _everythingService.IsAvailable
             ? $"Everything 状态：可用（需要 Everything.exe 运行，并可加载 Everything64.dll）{Environment.NewLine}日志目录：{AppLogger.LogDirectoryPath}"
@@ -71,7 +76,7 @@ public partial class MainWindow : Window
 
     private void ChangeAdminStartupSetting(bool enable)
     {
-        if (_isUpdatingAdminStartupUi)
+        if (_isUpdatingUi)
         {
             return;
         }
@@ -98,6 +103,50 @@ public partial class MainWindow : Window
         RefreshUi();
     }
 
+    private void AutoJumpExplorerCheckBox_OnChecked(object sender, RoutedEventArgs e)
+    {
+        ChangeAutoJumpExplorerSetting(enable: true);
+    }
+
+    private void AutoJumpExplorerCheckBox_OnUnchecked(object sender, RoutedEventArgs e)
+    {
+        ChangeAutoJumpExplorerSetting(enable: false);
+    }
+
+    private void ChangeAutoJumpExplorerSetting(bool enable)
+    {
+        if (_isUpdatingUi)
+        {
+            return;
+        }
+
+        _preferencesRepository.SetAutoJumpToExplorerOnAttachEnabled(enable);
+    }
+
+    private void MainWindowHotkeyCheckBox_OnChecked(object sender, RoutedEventArgs e)
+    {
+        ChangeMainWindowHotkeySetting(enable: true);
+    }
+
+    private void MainWindowHotkeyCheckBox_OnUnchecked(object sender, RoutedEventArgs e)
+    {
+        ChangeMainWindowHotkeySetting(enable: false);
+    }
+
+    private void ChangeMainWindowHotkeySetting(bool enable)
+    {
+        if (_isUpdatingUi)
+        {
+            return;
+        }
+
+        _preferencesRepository.SetMainWindowHotkeyEnabled(enable);
+        if (System.Windows.Application.Current is App app)
+        {
+            app.SetMainWindowHotkeyEnabled(enable);
+        }
+    }
+
     private void PromptRestartIfElevationNeeded()
     {
         if (AdminPrivilegeHelper.IsRunAsAdministrator())
@@ -107,7 +156,7 @@ public partial class MainWindow : Window
 
         var res = System.Windows.MessageBox.Show(
             this,
-            "已完成开机自启提权配置。\n当前进程仍是普通权限，重启后才会切到管理员权限运行。\n\n是否立即重启并提权？",
+            "已完成开机自启提权配置。\n当前进程仍是普通权限，重启软件后才会切到管理员权限运行。\n\n是否立即重启进程并提权？",
             "建议重启",
             MessageBoxButton.YesNo,
             MessageBoxImage.Question);

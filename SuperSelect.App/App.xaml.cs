@@ -67,7 +67,10 @@ public partial class App : System.Windows.Application
         _trayIcon.OpenRequested += OnTrayOpenRequested;
         _trayIcon.ExitRequested += OnTrayExitRequested;
 
-        InitializeGlobalHotkey();
+        if (_preferencesRepository.MainWindowHotkeyEnabled)
+        {
+            InitializeGlobalHotkey();
+        }
     }
 
     protected override void OnExit(ExitEventArgs e)
@@ -197,12 +200,12 @@ public partial class App : System.Windows.Application
             return;
         }
 
-        if (_dialogWatcher is null || _everythingService is null || _trayRepository is null)
+        if (_dialogWatcher is null || _everythingService is null || _trayRepository is null || _preferencesRepository is null)
         {
             return;
         }
 
-        var window = EnsureMainWindow(_dialogWatcher, _everythingService, _trayRepository);
+        var window = EnsureMainWindow(_dialogWatcher, _everythingService, _trayRepository, _preferencesRepository);
 
         if (!window.IsVisible)
         {
@@ -220,14 +223,15 @@ public partial class App : System.Windows.Application
     private MainWindow EnsureMainWindow(
         WinEventFileDialogWatcher watcher,
         EverythingService everythingService,
-        TrayRepository trayRepository)
+        TrayRepository trayRepository,
+        UserPreferencesRepository preferencesRepository)
     {
         if (MainWindow is MainWindow existing)
         {
             return existing;
         }
 
-        var created = new MainWindow(watcher, everythingService, trayRepository);
+        var created = new MainWindow(watcher, everythingService, trayRepository, preferencesRepository);
         created.Closed += MainWindow_OnClosed;
         MainWindow = created;
         return created;
@@ -348,6 +352,22 @@ public partial class App : System.Windows.Application
         }
 
         AppLogger.LogInfo($"Global hotkey registered: {MainWindowHotkeyDisplayName}");
+    }
+
+    internal void SetMainWindowHotkeyEnabled(bool enabled)
+    {
+        if (_isExitRequested)
+        {
+            return;
+        }
+
+        if (enabled)
+        {
+            InitializeGlobalHotkey();
+            return;
+        }
+
+        DisposeGlobalHotkey();
     }
 
     private void DisposeGlobalHotkey()

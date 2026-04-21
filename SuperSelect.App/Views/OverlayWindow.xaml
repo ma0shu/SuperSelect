@@ -15,6 +15,7 @@
         MaxHeight="216"
         MinWidth="560"
         MinHeight="48"
+        PreviewKeyDown="Window_OnPreviewKeyDown"
         PreviewDragOver="Window_OnPreviewDragOver"
         PreviewDrop="Window_OnPreviewDrop">
     <Window.Resources>

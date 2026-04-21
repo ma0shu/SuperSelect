@@ -85,6 +85,7 @@ public partial class OverlayWindow : Window
     private Visibility _lastMeasuredSummaryVisibility = Visibility.Collapsed;
     private int _trayStarToggleInFlight;
     private int _deferredHeightRecalcQueued;
+    private int _explorerJumpInFlight;
 
     internal OverlayWindow(
         EverythingService everythingService,
@@ -257,6 +258,10 @@ public partial class OverlayWindow : Window
             _dialogRectPollTimer.Start();
         }
         PositionToDialog();
+        if (_preferencesRepository.AutoJumpToExplorerOnAttachEnabled)
+        {
+            _ = JumpToPrimaryExplorerPathAsync(triggeredByAuto: true);
+        }
         RequestCandidatesRefresh();
     }
 
@@ -1117,6 +1122,9 @@ public partial class OverlayWindow : Window
 
     private void SetStatus(string? message)
     {
+        var previousVisibility = StatusText.Visibility;
+        var previousText = StatusText.Text;
+
         if (string.IsNullOrEmpty(message))
         {
             StatusText.Visibility = Visibility.Collapsed;
@@ -1126,6 +1134,27 @@ public partial class OverlayWindow : Window
         {
             StatusText.Visibility = Visibility.Visible;
             StatusText.Text = message;
+        }
+
+        if (ResultHost.Visibility != Visibility.Visible)
+        {
+            return;
+        }
+
+        var statusChanged =
+            previousVisibility != StatusText.Visibility ||
+            !string.Equals(previousText, StatusText.Text, StringComparison.Ordinal);
+        if (!statusChanged)
+        {
+            return;
+        }
+
+        var previousHeight = Height;
+        RecalculateWindowHeight();
+        if (Math.Abs(previousHeight - Height) > 0.5 ||
+            previousVisibility != StatusText.Visibility)
+        {
+            RequestPositionUpdate();
         }
     }
 
@@ -1312,6 +1341,26 @@ public partial class OverlayWindow : Window
         _searchDebounceTimer.Start();
     }
 
+    private void Window_OnPreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if ((Keyboard.Modifiers & ModifierKeys.Control) == 0)
+        {
+            return;
+        }
+
+        var key = e.Key == Key.System
+            ? e.SystemKey
+            : e.Key;
+
+        if (key != Key.G)
+        {
+            return;
+        }
+
+        _ = JumpToPrimaryExplorerPathAsync(triggeredByAuto: false);
+        e.Handled = true;
+    }
+
     private void SearchBox_OnPreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
         if (e.Key == Key.Down)
@@ -1411,6 +1460,93 @@ public partial class OverlayWindow : Window
 
         _ = ExecuteConfirmAsync(candidate);
         e.Handled = true;
+    }
+
+    private async Task JumpToPrimaryExplorerPathAsync(bool triggeredByAuto)
+    {
+        if (!IsVisible || _dialogHwnd == IntPtr.Zero || _dialogController is null)
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref _explorerJumpInFlight, 1, 0) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var candidate = await GetPrimaryExplorerPathCandidateAsync();
+            if (candidate is null)
+            {
+                if (!triggeredByAuto)
+                {
+                    SetStatus("未检测到可用资源管理器路径。");
+                }
+
+                return;
+            }
+
+            if (_currentMode != OverlayMode.Explorer || !string.IsNullOrWhiteSpace(SearchBox.Text))
+            {
+                _currentMode = OverlayMode.Explorer;
+                ApplyModeUiState();
+                if (!string.IsNullOrWhiteSpace(SearchBox.Text))
+                {
+                    SearchBox.Text = string.Empty;
+                }
+
+                _searchDebounceTimer.Stop();
+                RequestCandidatesRefresh();
+            }
+
+            await ExecuteSingleAsync(candidate);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogException(
+                "OverlayWindow.JumpToPrimaryExplorerPathAsync",
+                ex,
+                throttle: TimeSpan.FromSeconds(2));
+
+            if (!triggeredByAuto)
+            {
+                SetStatus("跳转资源管理器路径失败。");
+            }
+        }
+        finally
+        {
+            _ = Interlocked.Exchange(ref _explorerJumpInFlight, 0);
+        }
+    }
+
+    private async Task<FileCandidate?> GetPrimaryExplorerPathCandidateAsync()
+    {
+        var cached = _explorerWindowService.GetOpenLocationsCached(string.Empty);
+        var candidate = GetFirstValidExplorerCandidate(cached);
+        if (candidate is not null)
+        {
+            return candidate;
+        }
+
+        var refreshed = await Task.Run(() => _explorerWindowService.GetOpenLocations(string.Empty));
+        return GetFirstValidExplorerCandidate(refreshed);
+    }
+
+    private static FileCandidate? GetFirstValidExplorerCandidate(IReadOnlyList<FileCandidate> candidates)
+    {
+        for (var i = 0; i < candidates.Count; i++)
+        {
+            var candidate = candidates[i];
+            if (!candidate.IsDirectory || string.IsNullOrWhiteSpace(candidate.FullPath))
+            {
+                continue;
+            }
+
+            return candidate;
+        }
+
+        return null;
     }
 
     private async Task ExecuteSingleAsync(FileCandidate candidate)
