@@ -77,45 +77,13 @@ public partial class App : System.Windows.Application
         AppDomain.CurrentDomain.UnhandledException -= OnAppDomainUnhandledException;
         TaskScheduler.UnobservedTaskException -= OnTaskSchedulerUnobservedTaskException;
 
-        if (_trayIcon is not null)
-        {
-            _trayIcon.OpenRequested -= OnTrayOpenRequested;
-            _trayIcon.ExitRequested -= OnTrayExitRequested;
-            _trayIcon.Dispose();
-            _trayIcon = null;
-        }
-
+        DisposeTrayIcon();
         DisposeGlobalHotkey();
-
-        if (_dialogWatcher is not null)
-        {
-            _dialogWatcher.ActiveDialogChanged -= OnActiveDialogChanged;
-            _dialogWatcher.ActiveDialogMoved -= OnActiveDialogMoved;
-            _dialogWatcher.ActiveDialogContentChanged -= OnActiveDialogContentChanged;
-            _dialogWatcher.Dispose();
-        }
-
-        if (_dialogDetachDebounceTimer is not null)
-        {
-            _dialogDetachDebounceTimer.Tick -= DialogDetachDebounceTimer_OnTick;
-            _dialogDetachDebounceTimer.Stop();
-            _dialogDetachDebounceTimer = null;
-        }
-
-        if (_overlayWindow is not null)
-        {
-            _overlayWindow.Shutdown();
-            _overlayWindow = null;
-        }
-
-        _explorerWindowService?.Dispose();
-        _explorerWindowService = null;
-
-        if (MainWindow is Window mainWindow)
-        {
-            mainWindow.Closed -= MainWindow_OnClosed;
-            MainWindow = null;
-        }
+        DisposeDialogWatcher();
+        DisposeDialogDetachTimer();
+        DisposeOverlayWindow();
+        DisposeExplorerWindowService();
+        DisposeMainWindow(closeWindow: false);
 
         AppLogger.LogInfo("Application exit.");
         base.OnExit(e);
@@ -268,42 +236,87 @@ public partial class App : System.Windows.Application
     private void ExitApplication()
     {
         _isExitRequested = true;
-
+        DisposeTrayIcon();
         DisposeGlobalHotkey();
-
-        if (_dialogWatcher is not null)
-        {
-            _dialogWatcher.ActiveDialogChanged -= OnActiveDialogChanged;
-            _dialogWatcher.ActiveDialogMoved -= OnActiveDialogMoved;
-            _dialogWatcher.ActiveDialogContentChanged -= OnActiveDialogContentChanged;
-            _dialogWatcher.Dispose();
-            _dialogWatcher = null;
-        }
-
-        if (_dialogDetachDebounceTimer is not null)
-        {
-            _dialogDetachDebounceTimer.Tick -= DialogDetachDebounceTimer_OnTick;
-            _dialogDetachDebounceTimer.Stop();
-            _dialogDetachDebounceTimer = null;
-        }
-
-        if (_overlayWindow is not null)
-        {
-            _overlayWindow.Shutdown();
-            _overlayWindow = null;
-        }
-
-        _explorerWindowService?.Dispose();
-        _explorerWindowService = null;
-
-        if (MainWindow is not null)
-        {
-            MainWindow.Closed -= MainWindow_OnClosed;
-            MainWindow.Close();
-            MainWindow = null;
-        }
+        DisposeDialogWatcher();
+        DisposeDialogDetachTimer();
+        DisposeOverlayWindow();
+        DisposeExplorerWindowService();
+        DisposeMainWindow(closeWindow: true);
 
         Shutdown();
+    }
+
+    private void DisposeTrayIcon()
+    {
+        if (_trayIcon is null)
+        {
+            return;
+        }
+
+        _trayIcon.OpenRequested -= OnTrayOpenRequested;
+        _trayIcon.ExitRequested -= OnTrayExitRequested;
+        _trayIcon.Dispose();
+        _trayIcon = null;
+    }
+
+    private void DisposeDialogWatcher()
+    {
+        if (_dialogWatcher is null)
+        {
+            return;
+        }
+
+        _dialogWatcher.ActiveDialogChanged -= OnActiveDialogChanged;
+        _dialogWatcher.ActiveDialogMoved -= OnActiveDialogMoved;
+        _dialogWatcher.ActiveDialogContentChanged -= OnActiveDialogContentChanged;
+        _dialogWatcher.Dispose();
+        _dialogWatcher = null;
+    }
+
+    private void DisposeDialogDetachTimer()
+    {
+        if (_dialogDetachDebounceTimer is null)
+        {
+            return;
+        }
+
+        _dialogDetachDebounceTimer.Tick -= DialogDetachDebounceTimer_OnTick;
+        _dialogDetachDebounceTimer.Stop();
+        _dialogDetachDebounceTimer = null;
+    }
+
+    private void DisposeOverlayWindow()
+    {
+        if (_overlayWindow is null)
+        {
+            return;
+        }
+
+        _overlayWindow.Shutdown();
+        _overlayWindow = null;
+    }
+
+    private void DisposeExplorerWindowService()
+    {
+        _explorerWindowService?.Dispose();
+        _explorerWindowService = null;
+    }
+
+    private void DisposeMainWindow(bool closeWindow)
+    {
+        if (MainWindow is not Window mainWindow)
+        {
+            return;
+        }
+
+        mainWindow.Closed -= MainWindow_OnClosed;
+        if (closeWindow)
+        {
+            mainWindow.Close();
+        }
+
+        MainWindow = null;
     }
 
     private void InitializeGlobalHotkey()

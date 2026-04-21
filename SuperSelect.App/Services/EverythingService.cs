@@ -200,14 +200,7 @@ internal sealed class EverythingService
 
             try
             {
-                Native.Everything_SetMatchPath(false);
-                Native.Everything_SetMatchCase(false);
-                Native.Everything_SetRegex(false);
-                Native.Everything_SetRequestFlags(RequestFlags.FullPathAndFileName);
-                Native.Everything_SetSort(sortType);
-                Native.Everything_SetOffset((uint)boundedOffset);
-                Native.Everything_SetMax((uint)boundedMaxResults);
-                Native.Everything_SetSearchW(query);
+                ConfigureEverythingQuery(query, sortType, boundedOffset, boundedMaxResults);
 
                 if (!Native.Everything_QueryW(true))
                 {
@@ -236,21 +229,7 @@ internal sealed class EverythingService
                         continue;
                     }
 
-                    var displayName = Path.GetFileName(fullPath);
-                    if (string.IsNullOrWhiteSpace(displayName))
-                    {
-                        displayName = fullPath;
-                    }
-
-                    result.Add(
-                        new FileCandidate
-                        {
-                            FullPath = fullPath,
-                            DisplayName = displayName,
-                            SecondaryText = Path.GetDirectoryName(fullPath) ?? string.Empty,
-                            IsDirectory = isDirectoryResult,
-                            Source = source,
-                        });
+                    result.Add(CreateCandidate(fullPath, isDirectoryResult, source));
                 }
 
                 return result;
@@ -293,14 +272,7 @@ internal sealed class EverythingService
 
             try
             {
-                Native.Everything_SetMatchPath(false);
-                Native.Everything_SetMatchCase(false);
-                Native.Everything_SetRegex(false);
-                Native.Everything_SetRequestFlags(RequestFlags.FullPathAndFileName);
-                Native.Everything_SetSort(sortType);
-                Native.Everything_SetOffset((uint)boundedOffset);
-                Native.Everything_SetMax((uint)boundedMaxResults);
-                Native.Everything_SetSearchW(query);
+                ConfigureEverythingQuery(query, sortType, boundedOffset, boundedMaxResults);
 
                 if (!Native.Everything_QueryW(true))
                 {
@@ -329,22 +301,8 @@ internal sealed class EverythingService
                         continue;
                     }
 
-                    var displayName = Path.GetFileName(fullPath);
-                    if (string.IsNullOrWhiteSpace(displayName))
-                    {
-                        displayName = fullPath;
-                    }
-
                     var isDirectory = Native.Everything_IsFolderResult((uint)i);
-                    result.Add(
-                        new FileCandidate
-                        {
-                            FullPath = fullPath,
-                            DisplayName = displayName,
-                            SecondaryText = Path.GetDirectoryName(fullPath) ?? string.Empty,
-                            IsDirectory = isDirectory,
-                            Source = source,
-                        });
+                    result.Add(CreateCandidate(fullPath, isDirectory, source));
                 }
 
                 return result;
@@ -389,14 +347,7 @@ internal sealed class EverythingService
 
             try
             {
-                Native.Everything_SetMatchPath(false);
-                Native.Everything_SetMatchCase(false);
-                Native.Everything_SetRegex(false);
-                Native.Everything_SetRequestFlags(RequestFlags.FullPathAndFileName);
-                Native.Everything_SetSort(sortType);
-                Native.Everything_SetOffset((uint)boundedOffset);
-                Native.Everything_SetMax((uint)boundedMaxResults);
-                Native.Everything_SetSearchW(query);
+                ConfigureEverythingQuery(query, sortType, boundedOffset, boundedMaxResults);
 
                 if (!Native.Everything_QueryW(true))
                 {
@@ -430,21 +381,7 @@ internal sealed class EverythingService
                         continue;
                     }
 
-                    var displayName = Path.GetFileName(fullPath);
-                    if (string.IsNullOrWhiteSpace(displayName))
-                    {
-                        displayName = fullPath;
-                    }
-
-                    result.Add(
-                        new FileCandidate
-                        {
-                            FullPath = fullPath,
-                            DisplayName = displayName,
-                            SecondaryText = Path.GetDirectoryName(fullPath) ?? string.Empty,
-                            IsDirectory = false,
-                            Source = source,
-                        });
+                    result.Add(CreateCandidate(fullPath, isDirectory: false, source));
                 }
 
                 return (result, rawCount);
@@ -465,6 +402,36 @@ internal sealed class EverythingService
                 return ([], 0);
             }
         }
+    }
+
+    private static void ConfigureEverythingQuery(string query, uint sortType, int offset, int maxResults)
+    {
+        Native.Everything_SetMatchPath(false);
+        Native.Everything_SetMatchCase(false);
+        Native.Everything_SetRegex(false);
+        Native.Everything_SetRequestFlags(RequestFlags.FullPathAndFileName);
+        Native.Everything_SetSort(sortType);
+        Native.Everything_SetOffset((uint)offset);
+        Native.Everything_SetMax((uint)maxResults);
+        Native.Everything_SetSearchW(query);
+    }
+
+    private static FileCandidate CreateCandidate(string fullPath, bool isDirectory, CandidateSource source)
+    {
+        var displayName = Path.GetFileName(fullPath);
+        if (string.IsNullOrWhiteSpace(displayName))
+        {
+            displayName = fullPath;
+        }
+
+        return new FileCandidate
+        {
+            FullPath = fullPath,
+            DisplayName = displayName,
+            SecondaryText = Path.GetDirectoryName(fullPath) ?? string.Empty,
+            IsDirectory = isDirectory,
+            Source = source,
+        };
     }
 
     private static StringBuilder GetPathBuilder()

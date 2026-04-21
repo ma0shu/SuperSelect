@@ -22,8 +22,6 @@ public partial class OverlayWindow : Window
     private const double CompactHeightDip = 76.0;
     private const double ExpandedHeightDip = 216.0;
     private const double MinUsableHeightDip = 48.0;
-    private const double HeaderAndStatusHeightDip = 72.0;
-    private const double ResultSummaryHeightDip = 14.0;
     private const int OverlayGapPx = 0;
     private const int InitialQueryResultLimit = 320;
     private const int ExpandedQueryResultLimit = 1200;
@@ -69,8 +67,6 @@ public partial class OverlayWindow : Window
     private long _refreshRequestVersion;
     private long _refreshProcessedVersion;
     private int _refreshLoopInFlight;
-    private bool _refreshImmediateRequested;
-    private readonly object _refreshRequestSync = new();
     private bool _allowClose;
     private bool _dropInteropConfigured;
     private bool _positionUpdateRequested;
@@ -236,7 +232,7 @@ public partial class OverlayWindow : Window
                         _currentMode = OverlayMode.Explorer;
                     }
                     ApplyModeUiState();
-                    RequestCandidatesRefresh(immediate: true);
+                    RequestCandidatesRefresh();
                 }));
             });
         }
@@ -261,7 +257,7 @@ public partial class OverlayWindow : Window
             _dialogRectPollTimer.Start();
         }
         PositionToDialog();
-        RequestCandidatesRefresh(immediate: true);
+        RequestCandidatesRefresh();
     }
 
     public void DetachDialog()
@@ -281,7 +277,6 @@ public partial class OverlayWindow : Window
         _lastFileTypeFilterText = string.Empty;
         ApplyModeUiState();
         Interlocked.Increment(ref _singleSelectVersion);
-        lock (_refreshRequestSync) _refreshImmediateRequested = false;
 
         CancelAndDisposeRefreshCts();
         CancelAndDisposeSingleSelectCts();
@@ -351,16 +346,8 @@ public partial class OverlayWindow : Window
         DetachDialog();
     }
 
-    private void RequestCandidatesRefresh(bool immediate)
+    private void RequestCandidatesRefresh()
     {
-        lock (_refreshRequestSync)
-        {
-            if (immediate)
-            {
-                _refreshImmediateRequested = true;
-            }
-        }
-
         _ = Interlocked.Increment(ref _refreshRequestVersion);
         CancelAndDisposeRefreshCts();
 
@@ -386,8 +373,7 @@ public partial class OverlayWindow : Window
                     return;
                 }
 
-                var immediate = ConsumeRefreshImmediateFlag();
-                await RefreshCandidatesAsync(latestVersion, immediate);
+                await RefreshCandidatesAsync(latestVersion);
                 _ = Interlocked.Exchange(ref _refreshProcessedVersion, latestVersion);
             }
         }
@@ -412,23 +398,13 @@ public partial class OverlayWindow : Window
         }
     }
 
-    private bool ConsumeRefreshImmediateFlag()
-    {
-        lock (_refreshRequestSync)
-        {
-            var immediate = _refreshImmediateRequested;
-            _refreshImmediateRequested = false;
-            return immediate;
-        }
-    }
-
     private bool IsRefreshObsolete(long requestVersion, CancellationToken token)
     {
         return token.IsCancellationRequested ||
                requestVersion != Interlocked.Read(ref _refreshRequestVersion);
     }
 
-    private async Task RefreshCandidatesAsync(long requestVersion, bool immediate = false)
+    private async Task RefreshCandidatesAsync(long requestVersion)
     {
         if (_dialogController is null)
         {
@@ -600,7 +576,7 @@ public partial class OverlayWindow : Window
         };
     }
 
-    private async Task<(IReadOnlyList<FileCandidate> Items, string? StatusMessage, bool CanApplyTypeFilter, string Caption)?> QueryCandidatesByModeAsync(
+    private async Task<(IReadOnlyList<FileCandidate> Items, string? StatusMessage, bool CanApplyTypeFilter)?> QueryCandidatesByModeAsync(
         OverlayMode mode,
         string keyword,
         EverythingSortOption sort,
@@ -608,9 +584,8 @@ public partial class OverlayWindow : Window
         CancellationToken token)
     {
         IReadOnlyList<FileCandidate> items = [];
-        string? statusMessage = string.Empty;
+        string? statusMessage = null;
         var canApplyTypeFilter = true;
-        var caption = "结果";
 
         try
         {
@@ -621,7 +596,6 @@ public partial class OverlayWindow : Window
                         ? await _everythingService.SearchFoldersAsync(keyword, sort, resultLimit, token)
                         : await _everythingService.SearchEntriesAsync(keyword, sort, resultLimit, token);
 
-                    caption = _isFolderDialog ? "文件夹搜索" : "搜索";
                     if (!_everythingService.IsAvailable)
                     {
                         statusMessage = $"Everything 不可用：{_everythingService.LastErrorMessage}";
@@ -640,7 +614,6 @@ public partial class OverlayWindow : Window
                         ? await _everythingService.RecentFoldersAsync(sort, resultLimit, token)
                         : await _everythingService.RecentFilesAsync(sort, resultLimit, token);
 
-                    caption = _isFolderDialog ? "最近文件夹" : "最近文件";
                     if (!_everythingService.IsAvailable)
                     {
                         statusMessage = $"Everything 不可用：{_everythingService.LastErrorMessage}";
@@ -661,13 +634,11 @@ public partial class OverlayWindow : Window
                         items = items.Where(candidate => candidate.IsDirectory).ToList();
                     }
 
-                    caption = _isFolderDialog ? "托盘文件夹" : "托盘文件";
                     statusMessage = null;
                     break;
                 case OverlayMode.Explorer:
                     items = _explorerWindowService.GetOpenLocationsCached(string.Empty);
                     _explorerWindowService.EnsureSnapshotFreshAsync(force: false);
-                    caption = "资源管理器路径";
                     statusMessage = items.Count == 0
                         ? "未检测到可用资源管理器路径。"
                         : null;
@@ -680,7 +651,7 @@ public partial class OverlayWindow : Window
             return null;
         }
 
-        return (items, statusMessage, canApplyTypeFilter, caption);
+        return (items, statusMessage, canApplyTypeFilter);
     }
 
     private (IReadOnlyList<FileCandidate> Items, string? StatusMessage) ApplyTypeFilter(
@@ -1096,8 +1067,6 @@ public partial class OverlayWindow : Window
 
         var finalHeightDip = PxToDip(finalHeightPx, scale);
 
-        UpdateResultHostHeight(finalHeightDip);
-
         if (_hasAppliedPosition &&
             _lastOverlayLeftPx == desiredLeftPx &&
             _lastOverlayTopPx == desiredTopPx &&
@@ -1144,12 +1113,6 @@ public partial class OverlayWindow : Window
                left.Top == right.Top &&
                left.Right == right.Right &&
                left.Bottom == right.Bottom;
-    }
-
-    private void UpdateResultHostHeight(double windowHeightDip)
-    {
-        // No longer forcing ResultHost to a specific height.
-        // XAML Grid RowDefinitions takes care of it natively.
     }
 
     private void SetStatus(string? message)
@@ -1224,7 +1187,7 @@ public partial class OverlayWindow : Window
     private void SearchDebounceTimer_OnTick(object? sender, EventArgs e)
     {
         _searchDebounceTimer.Stop();
-        RequestCandidatesRefresh(immediate: false);
+        RequestCandidatesRefresh();
     }
 
     private async void DialogMonitorTimer_OnTick(object? sender, EventArgs e)
@@ -1314,7 +1277,7 @@ public partial class OverlayWindow : Window
             if (folderModeChanged || filterChanged)
             {
                 _searchDebounceTimer.Stop();
-                RequestCandidatesRefresh(immediate: true);
+                RequestCandidatesRefresh();
             }
         }
         catch (Exception ex)
@@ -1632,7 +1595,7 @@ public partial class OverlayWindow : Window
         ApplyModeUiState();
 
         _searchDebounceTimer.Stop();
-        RequestCandidatesRefresh(immediate: true);
+        RequestCandidatesRefresh();
     }
 
     private void ResetModeForDialog()
@@ -1695,7 +1658,7 @@ public partial class OverlayWindow : Window
         if (_currentMode is OverlayMode.Search or OverlayMode.Recent)
         {
             _searchDebounceTimer.Stop();
-            RequestCandidatesRefresh(immediate: true);
+            RequestCandidatesRefresh();
         }
     }
 
@@ -1723,7 +1686,7 @@ public partial class OverlayWindow : Window
         ApplyModeUiState();
 
         _searchDebounceTimer.Stop();
-        RequestCandidatesRefresh(immediate: true);
+        RequestCandidatesRefresh();
     }
 
     private void ConfigureDropInteropCompatibility(IntPtr overlayHwnd)
@@ -1768,7 +1731,7 @@ public partial class OverlayWindow : Window
 
         if (_currentMode == OverlayMode.Tray)
         {
-            RequestCandidatesRefresh(immediate: true);
+            RequestCandidatesRefresh();
         }
 
         e.Handled = true;
@@ -1954,7 +1917,7 @@ public partial class OverlayWindow : Window
             menuItem.DataContext is FileCandidate candidate)
         {
             _trayRepository.PinToTop(candidate.FullPath);
-            RequestCandidatesRefresh(immediate: true);
+            RequestCandidatesRefresh();
         }
     }
 
@@ -1964,7 +1927,7 @@ public partial class OverlayWindow : Window
             menuItem.DataContext is FileCandidate candidate)
         {
             _trayRepository.Remove(candidate.FullPath);
-            RequestCandidatesRefresh(immediate: true);
+            RequestCandidatesRefresh();
         }
     }
 
