@@ -3,3 +3,4 @@
 # Ignore SuperSelect.App/bin
 SuperSelect.App/bin/
 SuperSelect.App/obj/
+/artifacts/

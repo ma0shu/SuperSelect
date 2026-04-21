@@ -8,22 +8,41 @@ namespace SuperSelect.App.Services;
 
 internal sealed class EverythingService
 {
-    internal readonly record struct RecentBlockEntry(string FullPath, bool IsDirectory);
+    internal readonly record struct BlockedPathEntry(
+        string FullPath,
+        bool IsDirectory,
+        bool BlockSearch,
+        bool BlockRecent);
 
-    private sealed class RecentBlocklistPayload
+    private sealed class BlocklistPayload
     {
-        public List<string> Files { get; set; } = [];
-        public List<string> Directories { get; set; } = [];
+        public List<BlockRulePayload> Rules { get; set; } = [];
+    }
+
+    private sealed class BlockRulePayload
+    {
+        public string Path { get; set; } = string.Empty;
+        public bool IsDirectory { get; set; }
+        public bool BlockSearch { get; set; }
+        public bool BlockRecent { get; set; }
+    }
+
+    private sealed class BlockRuleState
+    {
+        public bool IsDirectory { get; set; }
+        public bool BlockSearch { get; set; }
+        public bool BlockRecent { get; set; }
     }
 
     private readonly object _syncRoot = new();
-    private readonly string _recentBlocklistPath;
+    private readonly string _blocklistPath;
     private static readonly TimeSpan AvailabilityProbeInterval = TimeSpan.FromMilliseconds(500);
     private bool _isAvailable = true;
     private string _lastErrorMessage = string.Empty;
     private DateTime _lastAvailabilityProbeUtc = DateTime.MinValue;
-    private HashSet<string> _blockedRecentFiles = new(StringComparer.OrdinalIgnoreCase);
-    private HashSet<string> _blockedRecentDirectories = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, BlockRuleState> _blockedPathRules = new(StringComparer.OrdinalIgnoreCase);
+    private string _searchBlockQuerySuffix = string.Empty;
+    private string _recentBlockQuerySuffix = string.Empty;
     [ThreadStatic]
     private static StringBuilder? _threadPathBuilder;
 
@@ -33,8 +52,8 @@ internal sealed class EverythingService
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "SuperSelect");
         Directory.CreateDirectory(storeDirectory);
-        _recentBlocklistPath = Path.Combine(storeDirectory, "recent-blocklist.json");
-        LoadRecentBlocklist();
+        _blocklistPath = Path.Combine(storeDirectory, "recent-blocklist.json");
+        LoadBlocklist();
     }
 
     public bool IsAvailable
@@ -91,7 +110,7 @@ internal sealed class EverythingService
         int maxResults,
         CancellationToken cancellationToken)
     {
-        var query = string.IsNullOrWhiteSpace(keyword) ? string.Empty : keyword.Trim();
+        var query = BuildSearchMixedQuery(keyword);
 
         return Task.Run(
             () => QueryInternalMixed(query, ToEverythingSort(sortOption), maxResults, CandidateSource.EverythingSearch, cancellationToken),
@@ -162,67 +181,67 @@ internal sealed class EverythingService
             cancellationToken);
     }
 
+    public bool BlockSearchFile(string fullPath)
+    {
+        return UpdatePathBlockState(fullPath, isDirectory: false, blockSearch: true, blockRecent: null);
+    }
+
+    public bool BlockSearchDirectory(string directoryPath)
+    {
+        return UpdatePathBlockState(directoryPath, isDirectory: true, blockSearch: true, blockRecent: null);
+    }
+
     public bool BlockRecentFile(string fullPath)
     {
-        var normalized = NormalizePath(fullPath);
-        if (normalized is null)
-        {
-            return false;
-        }
-
-        lock (_syncRoot)
-        {
-            if (!_blockedRecentFiles.Add(normalized))
-            {
-                return false;
-            }
-
-            SaveRecentBlocklistLocked();
-            return true;
-        }
+        return UpdatePathBlockState(fullPath, isDirectory: false, blockSearch: null, blockRecent: true);
     }
 
     public bool BlockRecentDirectory(string directoryPath)
     {
-        var normalized = NormalizePath(directoryPath);
-        if (normalized is null)
-        {
-            return false;
-        }
-
-        lock (_syncRoot)
-        {
-            if (!_blockedRecentDirectories.Add(normalized))
-            {
-                return false;
-            }
-
-            SaveRecentBlocklistLocked();
-            return true;
-        }
+        return UpdatePathBlockState(directoryPath, isDirectory: true, blockSearch: null, blockRecent: true);
     }
 
-    public IReadOnlyList<RecentBlockEntry> GetRecentBlockEntries()
+    public bool UnblockSearchFile(string fullPath)
     {
-        lock (_syncRoot)
-        {
-            var result = new List<RecentBlockEntry>(_blockedRecentFiles.Count + _blockedRecentDirectories.Count);
+        return UpdatePathBlockState(fullPath, isDirectory: false, blockSearch: false, blockRecent: null);
+    }
 
-            foreach (var directory in _blockedRecentDirectories.Order(StringComparer.OrdinalIgnoreCase))
-            {
-                result.Add(new RecentBlockEntry(directory, IsDirectory: true));
-            }
-
-            foreach (var file in _blockedRecentFiles.Order(StringComparer.OrdinalIgnoreCase))
-            {
-                result.Add(new RecentBlockEntry(file, IsDirectory: false));
-            }
-
-            return result;
-        }
+    public bool UnblockSearchDirectory(string directoryPath)
+    {
+        return UpdatePathBlockState(directoryPath, isDirectory: true, blockSearch: false, blockRecent: null);
     }
 
     public bool UnblockRecentFile(string fullPath)
+    {
+        return UpdatePathBlockState(fullPath, isDirectory: false, blockSearch: null, blockRecent: false);
+    }
+
+    public bool UnblockRecentDirectory(string directoryPath)
+    {
+        return UpdatePathBlockState(directoryPath, isDirectory: true, blockSearch: null, blockRecent: false);
+    }
+
+    public bool SetBlockedScopes(string fullPath, bool isDirectory, bool blockSearch, bool blockRecent)
+    {
+        return UpdatePathBlockState(fullPath, isDirectory, blockSearch, blockRecent);
+    }
+
+    public IReadOnlyList<BlockedPathEntry> GetBlockedPathEntries()
+    {
+        lock (_syncRoot)
+        {
+            return _blockedPathRules
+                .OrderBy(static pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(static pair => new BlockedPathEntry(
+                    pair.Key,
+                    pair.Value.IsDirectory,
+                    pair.Value.BlockSearch,
+                    pair.Value.BlockRecent))
+                .ToList();
+        }
+    }
+
+    private bool UpdatePathBlockState(string fullPath, bool isDirectory, bool? blockSearch, bool? blockRecent)
     {
         var normalized = NormalizePath(fullPath);
         if (normalized is null)
@@ -232,78 +251,123 @@ internal sealed class EverythingService
 
         lock (_syncRoot)
         {
-            if (!_blockedRecentFiles.Remove(normalized))
+            return UpdatePathBlockStateLocked(normalized, isDirectory, blockSearch, blockRecent);
+        }
+    }
+
+    private bool UpdatePathBlockStateLocked(string normalizedPath, bool isDirectory, bool? blockSearch, bool? blockRecent)
+    {
+        _ = _blockedPathRules.TryGetValue(normalizedPath, out var existingState);
+        existingState ??= new BlockRuleState
+        {
+            IsDirectory = isDirectory,
+            BlockSearch = false,
+            BlockRecent = false,
+        };
+
+        var nextIsDirectory = existingState.IsDirectory || isDirectory;
+        var nextBlockSearch = blockSearch ?? existingState.BlockSearch;
+        var nextBlockRecent = blockRecent ?? existingState.BlockRecent;
+
+        if (!nextBlockSearch && !nextBlockRecent)
+        {
+            if (!_blockedPathRules.Remove(normalizedPath))
             {
                 return false;
             }
 
-            SaveRecentBlocklistLocked();
+            RebuildBlockQuerySuffixLocked();
+            SaveBlocklistLocked();
             return true;
         }
-    }
 
-    public bool UnblockRecentDirectory(string directoryPath)
-    {
-        var normalized = NormalizePath(directoryPath);
-        if (normalized is null)
+        if (_blockedPathRules.TryGetValue(normalizedPath, out var currentState) &&
+            currentState.IsDirectory == nextIsDirectory &&
+            currentState.BlockSearch == nextBlockSearch &&
+            currentState.BlockRecent == nextBlockRecent)
         {
             return false;
         }
 
-        lock (_syncRoot)
+        _blockedPathRules[normalizedPath] = new BlockRuleState
         {
-            if (!_blockedRecentDirectories.Remove(normalized))
-            {
-                return false;
-            }
+            IsDirectory = nextIsDirectory,
+            BlockSearch = nextBlockSearch,
+            BlockRecent = nextBlockRecent,
+        };
 
-            SaveRecentBlocklistLocked();
-            return true;
-        }
+        RebuildBlockQuerySuffixLocked();
+        SaveBlocklistLocked();
+        return true;
     }
 
-    private static string BuildSearchQuery(bool isDirectoryQuery, string keyword)
+    private string BuildSearchMixedQuery(string keyword)
+    {
+        var baseQuery = string.IsNullOrWhiteSpace(keyword)
+            ? string.Empty
+            : keyword.Trim();
+        return AppendBlockSuffix(baseQuery, forSearchScope: true);
+    }
+
+    private string BuildSearchQuery(bool isDirectoryQuery, string keyword)
     {
         var prefix = isDirectoryQuery ? "folder:" : "file:";
-        return string.IsNullOrWhiteSpace(keyword)
+        var baseQuery = string.IsNullOrWhiteSpace(keyword)
             ? prefix
             : $"{prefix} {keyword.Trim()}";
+        return AppendBlockSuffix(baseQuery, forSearchScope: true);
     }
 
     private string BuildRecentQuery(string baseQuery)
     {
-        List<string> blockedFiles;
-        List<string> blockedDirectories;
-        lock (_syncRoot)
-        {
-            blockedFiles = _blockedRecentFiles.ToList();
-            blockedDirectories = _blockedRecentDirectories.ToList();
-        }
+        return AppendBlockSuffix(baseQuery, forSearchScope: false);
+    }
 
-        if (blockedFiles.Count == 0 && blockedDirectories.Count == 0)
+    private string AppendBlockSuffix(string baseQuery, bool forSearchScope)
+    {
+        var suffix = forSearchScope ? _searchBlockQuerySuffix : _recentBlockQuerySuffix;
+        if (string.IsNullOrEmpty(suffix))
         {
             return baseQuery;
         }
 
-        var builder = new StringBuilder(baseQuery);
-
-        for (var i = 0; i < blockedFiles.Count; i++)
+        if (string.IsNullOrWhiteSpace(baseQuery))
         {
-            builder.Append(' ');
-            builder.Append("!path:\"");
-            builder.Append(blockedFiles[i]);
-            builder.Append('"');
+            return suffix[0] == ' ' ? suffix[1..] : suffix;
         }
 
-        for (var i = 0; i < blockedDirectories.Count; i++)
+        return baseQuery + suffix;
+    }
+
+    private static void AppendPathExclusion(StringBuilder builder, string path, bool isDirectory)
+    {
+        builder.Append(' ');
+        builder.Append("!path:\"");
+        builder.Append(isDirectory ? EnsureTrailingDirectorySeparator(path) : path);
+        builder.Append('"');
+    }
+
+    private void RebuildBlockQuerySuffixLocked()
+    {
+        var searchBuilder = new StringBuilder();
+        var recentBuilder = new StringBuilder();
+
+        foreach (var pair in _blockedPathRules)
         {
-            builder.Append(' ');
-            builder.Append("!path:\"");
-            builder.Append(EnsureTrailingDirectorySeparator(blockedDirectories[i]));
-            builder.Append('"');
+            var state = pair.Value;
+            if (state.BlockSearch)
+            {
+                AppendPathExclusion(searchBuilder, pair.Key, state.IsDirectory);
+            }
+
+            if (state.BlockRecent)
+            {
+                AppendPathExclusion(recentBuilder, pair.Key, state.IsDirectory);
+            }
         }
 
-        return builder.ToString();
+        _searchBlockQuerySuffix = searchBuilder.ToString();
+        _recentBlockQuerySuffix = recentBuilder.ToString();
     }
 
     private IReadOnlyList<FileCandidate> QueryInternal(
@@ -653,56 +717,84 @@ internal sealed class EverythingService
         }
     }
 
-    private void LoadRecentBlocklist()
+    private void LoadBlocklist()
     {
         try
         {
-            if (!File.Exists(_recentBlocklistPath))
+            if (!File.Exists(_blocklistPath))
             {
                 return;
             }
 
-            var payload = JsonSerializer.Deserialize<RecentBlocklistPayload>(File.ReadAllText(_recentBlocklistPath));
+            var payload = JsonSerializer.Deserialize<BlocklistPayload>(File.ReadAllText(_blocklistPath));
             if (payload is null)
             {
                 return;
             }
 
+            var loadedRules = new Dictionary<string, BlockRuleState>(StringComparer.OrdinalIgnoreCase);
+            for (var i = 0; i < payload.Rules.Count; i++)
+            {
+                var rule = payload.Rules[i];
+                if (!rule.BlockSearch && !rule.BlockRecent)
+                {
+                    continue;
+                }
+
+                var normalized = NormalizePath(rule.Path);
+                if (normalized is null)
+                {
+                    continue;
+                }
+
+                if (!loadedRules.TryGetValue(normalized, out var state))
+                {
+                    loadedRules[normalized] = new BlockRuleState
+                    {
+                        IsDirectory = rule.IsDirectory,
+                        BlockSearch = rule.BlockSearch,
+                        BlockRecent = rule.BlockRecent,
+                    };
+                    continue;
+                }
+
+                state.IsDirectory = state.IsDirectory || rule.IsDirectory;
+                state.BlockSearch = state.BlockSearch || rule.BlockSearch;
+                state.BlockRecent = state.BlockRecent || rule.BlockRecent;
+            }
+
             lock (_syncRoot)
             {
-                _blockedRecentFiles = new HashSet<string>(
-                    payload.Files
-                        .Select(NormalizePath)
-                        .Where(static p => !string.IsNullOrWhiteSpace(p))!
-                        .Select(static p => p!),
-                    StringComparer.OrdinalIgnoreCase);
-
-                _blockedRecentDirectories = new HashSet<string>(
-                    payload.Directories
-                        .Select(NormalizePath)
-                        .Where(static p => !string.IsNullOrWhiteSpace(p))!
-                        .Select(static p => p!),
-                    StringComparer.OrdinalIgnoreCase);
+                _blockedPathRules = loadedRules;
+                RebuildBlockQuerySuffixLocked();
             }
         }
         catch
         {
-            // Ignore malformed blocklist and continue with empty sets.
+            // Ignore malformed blocklist and continue with empty rules.
         }
     }
 
-    private void SaveRecentBlocklistLocked()
+    private void SaveBlocklistLocked()
     {
         try
         {
-            var payload = new RecentBlocklistPayload
+            var payload = new BlocklistPayload
             {
-                Files = _blockedRecentFiles.Order(StringComparer.OrdinalIgnoreCase).ToList(),
-                Directories = _blockedRecentDirectories.Order(StringComparer.OrdinalIgnoreCase).ToList(),
+                Rules = _blockedPathRules
+                    .OrderBy(static pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+                    .Select(static pair => new BlockRulePayload
+                    {
+                        Path = pair.Key,
+                        IsDirectory = pair.Value.IsDirectory,
+                        BlockSearch = pair.Value.BlockSearch,
+                        BlockRecent = pair.Value.BlockRecent,
+                    })
+                    .ToList(),
             };
 
             var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(_recentBlocklistPath, json);
+            File.WriteAllText(_blocklistPath, json);
         }
         catch
         {

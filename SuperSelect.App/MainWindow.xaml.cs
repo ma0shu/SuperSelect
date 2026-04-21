@@ -10,12 +10,14 @@ namespace SuperSelect.App;
 
 public partial class MainWindow : Window
 {
-    private sealed class BlockedRecentItem
+    private sealed class BlockedPathItem
     {
         public required string FullPath { get; init; }
         public required string DisplayName { get; init; }
         public string SecondaryText { get; init; } = string.Empty;
         public bool IsDirectory { get; init; }
+        public bool BlockSearch { get; set; }
+        public bool BlockRecent { get; set; }
         public string TypeLabel => IsDirectory ? "目录" : "文件";
     }
 
@@ -24,7 +26,7 @@ public partial class MainWindow : Window
     private readonly TrayRepository _trayRepository;
     private readonly UserPreferencesRepository _preferencesRepository;
     private readonly ObservableCollection<FileCandidate> _trayItems = [];
-    private readonly ObservableCollection<BlockedRecentItem> _blockedRecentItems = [];
+    private readonly ObservableCollection<BlockedPathItem> _blockedPathItems = [];
     private bool _isUpdatingUi;
 
     internal MainWindow(
@@ -41,7 +43,7 @@ public partial class MainWindow : Window
         _preferencesRepository = preferencesRepository;
 
         TrayList.ItemsSource = _trayItems;
-        BlockedRecentList.ItemsSource = _blockedRecentItems;
+        BlockedRecentList.ItemsSource = _blockedPathItems;
         RefreshUi();
     }
 
@@ -251,8 +253,8 @@ public partial class MainWindow : Window
 
     private void RefreshBlockedRecentList()
     {
-        _blockedRecentItems.Clear();
-        foreach (var entry in _everythingService.GetRecentBlockEntries())
+        _blockedPathItems.Clear();
+        foreach (var entry in _everythingService.GetBlockedPathEntries())
         {
             var pathForDisplay = entry.IsDirectory
                 ? Path.TrimEndingDirectorySeparator(entry.FullPath)
@@ -263,12 +265,14 @@ public partial class MainWindow : Window
                 displayName = pathForDisplay;
             }
 
-            _blockedRecentItems.Add(new BlockedRecentItem
+            _blockedPathItems.Add(new BlockedPathItem
             {
                 FullPath = entry.FullPath,
                 DisplayName = displayName,
                 SecondaryText = Path.GetDirectoryName(pathForDisplay) ?? string.Empty,
                 IsDirectory = entry.IsDirectory,
+                BlockSearch = entry.BlockSearch,
+                BlockRecent = entry.BlockRecent,
             });
         }
     }
@@ -285,15 +289,53 @@ public partial class MainWindow : Window
 
     private void RemoveBlockedButton_OnClick(object sender, RoutedEventArgs e)
     {
-        if (BlockedRecentList.SelectedItem is not BlockedRecentItem item)
+        if (BlockedRecentList.SelectedItem is not BlockedPathItem item)
         {
             return;
         }
 
-        _ = item.IsDirectory
-            ? _everythingService.UnblockRecentDirectory(item.FullPath)
-            : _everythingService.UnblockRecentFile(item.FullPath);
-        RefreshBlockedRecentList();
+        if (_everythingService.SetBlockedScopes(item.FullPath, item.IsDirectory, blockSearch: false, blockRecent: false))
+        {
+            _blockedPathItems.Remove(item);
+        }
+    }
+
+    private void BlockedSearchScopeCheckBox_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.CheckBox { DataContext: BlockedPathItem item })
+        {
+            return;
+        }
+
+        item.BlockSearch = sender is System.Windows.Controls.CheckBox checkBox && checkBox.IsChecked == true;
+        if (!_everythingService.SetBlockedScopes(item.FullPath, item.IsDirectory, item.BlockSearch, item.BlockRecent))
+        {
+            return;
+        }
+
+        if (!item.BlockSearch && !item.BlockRecent)
+        {
+            _blockedPathItems.Remove(item);
+        }
+    }
+
+    private void BlockedRecentScopeCheckBox_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.CheckBox { DataContext: BlockedPathItem item })
+        {
+            return;
+        }
+
+        item.BlockRecent = sender is System.Windows.Controls.CheckBox checkBox && checkBox.IsChecked == true;
+        if (!_everythingService.SetBlockedScopes(item.FullPath, item.IsDirectory, item.BlockSearch, item.BlockRecent))
+        {
+            return;
+        }
+
+        if (!item.BlockSearch && !item.BlockRecent)
+        {
+            _blockedPathItems.Remove(item);
+        }
     }
 
     private void RemoveButton_OnClick(object sender, RoutedEventArgs e)

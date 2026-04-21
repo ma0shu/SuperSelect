@@ -6,7 +6,7 @@
         mc:Ignorable="d"
         Title="SuperSelect"
         Icon="Resources/app.ico"
-        Height="420"
+        Height="480"
         Width="680"
         MinHeight="360"
         MinWidth="560"
@@ -136,7 +136,7 @@
             </Grid.RowDefinitions>
 
             <Grid Grid.Row="0" Margin="0,0,0,8">
-                <TextBlock Text="最近屏蔽项"
+                <TextBlock Text="屏蔽项"
                            FontWeight="SemiBold"
                            VerticalAlignment="Center"
                            Foreground="{DynamicResource MainWindowPrimaryTextBrush}" />
@@ -195,6 +195,8 @@
                                     <ColumnDefinition Width="4.5*" />
                                     <ColumnDefinition Width="3*" />
                                     <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Grid.Column="0"
                                            x:Name="BlockedIconText"
@@ -222,7 +224,22 @@
                                            FontSize="10"
                                            Foreground="{DynamicResource MainWindowSecondaryTextBrush}"
                                            VerticalAlignment="Center"
-                                           Margin="8,0,0,0" />
+                                           Margin="8,0,10,0" />
+                                <CheckBox Grid.Column="4"
+                                          Content="屏蔽搜索"
+                                          IsChecked="{Binding BlockSearch}"
+                                          Click="BlockedSearchScopeCheckBox_OnClick"
+                                          Foreground="{DynamicResource MainWindowSecondaryTextBrush}"
+                                          FontSize="11"
+                                          VerticalAlignment="Center"
+                                          Margin="0,0,10,0" />
+                                <CheckBox Grid.Column="5"
+                                          Content="屏蔽最近"
+                                          IsChecked="{Binding BlockRecent}"
+                                          Click="BlockedRecentScopeCheckBox_OnClick"
+                                          Foreground="{DynamicResource MainWindowSecondaryTextBrush}"
+                                          FontSize="11"
+                                          VerticalAlignment="Center" />
                             </Grid>
                             <DataTemplate.Triggers>
                                 <DataTrigger Binding="{Binding IsDirectory}" Value="True">

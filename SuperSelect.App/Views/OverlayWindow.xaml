@@ -262,6 +262,10 @@
                                 <MenuItem Header="置顶" Click="TrayMenuItem_Pin_OnClick" />
                                 <MenuItem Header="删除" Click="TrayMenuItem_Delete_OnClick" />
                             </ContextMenu>
+                            <ContextMenu x:Key="SearchContextMenu" DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                                <MenuItem x:Name="SearchBlockFileMenuItem" Header="屏蔽此文件" Click="SearchMenuItem_BlockFile_OnClick" />
+                                <MenuItem Header="屏蔽此目录" Click="SearchMenuItem_BlockDirectory_OnClick" />
+                            </ContextMenu>
                             <ContextMenu x:Key="RecentContextMenu" DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
                                 <MenuItem x:Name="RecentBlockFileMenuItem" Header="屏蔽此文件" Click="RecentMenuItem_BlockFile_OnClick" />
                                 <MenuItem Header="屏蔽此目录" Click="RecentMenuItem_BlockDirectory_OnClick" />

@@ -1929,7 +1929,7 @@ public partial class OverlayWindow : Window
 
     private void ResultList_OnContextMenuOpening(object sender, ContextMenuEventArgs e)
     {
-        if (_currentMode is not OverlayMode.Tray and not OverlayMode.Recent)
+        if (_currentMode is not OverlayMode.Tray and not OverlayMode.Recent and not OverlayMode.Search)
         {
             e.Handled = true;
         }
@@ -1946,6 +1946,21 @@ public partial class OverlayWindow : Window
                     trayMenu.PlacementTarget = item;
                     trayMenu.DataContext = candidate;
                     trayMenu.IsOpen = true;
+                }
+            }
+            else if (_currentMode == OverlayMode.Search)
+            {
+                if (ResultList.Resources["SearchContextMenu"] is ContextMenu searchMenu)
+                {
+                    searchMenu.PlacementTarget = item;
+                    searchMenu.DataContext = candidate;
+
+                    if (searchMenu.Items.OfType<MenuItem>().FirstOrDefault() is MenuItem blockFileItem)
+                    {
+                        blockFileItem.IsEnabled = !candidate.IsDirectory;
+                    }
+
+                    searchMenu.IsOpen = true;
                 }
             }
             else if (_currentMode == OverlayMode.Recent)
@@ -2130,6 +2145,49 @@ public partial class OverlayWindow : Window
         }
     }
 
+    private void SearchMenuItem_BlockFile_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { DataContext: FileCandidate candidate } || candidate.IsDirectory)
+        {
+            return;
+        }
+
+        var blocked = _everythingService.BlockSearchFile(candidate.FullPath);
+        SetStatus(blocked
+            ? $"已屏蔽搜索文件：{candidate.DisplayName}"
+            : "该文件已在搜索屏蔽列表中。");
+
+        if (_currentMode == OverlayMode.Search)
+        {
+            RequestCandidatesRefresh();
+        }
+    }
+
+    private void SearchMenuItem_BlockDirectory_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { DataContext: FileCandidate candidate })
+        {
+            return;
+        }
+
+        var directory = GetCandidateDirectory(candidate);
+        if (string.IsNullOrWhiteSpace(directory))
+        {
+            SetStatus("无法识别可屏蔽目录。");
+            return;
+        }
+
+        var blocked = _everythingService.BlockSearchDirectory(directory);
+        SetStatus(blocked
+            ? $"已屏蔽搜索目录：{directory}"
+            : "该目录已在搜索屏蔽列表中。");
+
+        if (_currentMode == OverlayMode.Search)
+        {
+            RequestCandidatesRefresh();
+        }
+    }
+
     private void RecentMenuItem_BlockFile_OnClick(object sender, RoutedEventArgs e)
     {
         if (sender is not MenuItem { DataContext: FileCandidate candidate } || candidate.IsDirectory)
@@ -2155,10 +2213,7 @@ public partial class OverlayWindow : Window
             return;
         }
 
-        var directory = candidate.IsDirectory
-            ? candidate.FullPath
-            : (Path.GetDirectoryName(candidate.FullPath) ?? string.Empty);
-
+        var directory = GetCandidateDirectory(candidate);
         if (string.IsNullOrWhiteSpace(directory))
         {
             SetStatus("无法识别可屏蔽目录。");
@@ -2174,6 +2229,13 @@ public partial class OverlayWindow : Window
         {
             RequestCandidatesRefresh();
         }
+    }
+
+    private static string GetCandidateDirectory(FileCandidate candidate)
+    {
+        return candidate.IsDirectory
+            ? candidate.FullPath
+            : (Path.GetDirectoryName(candidate.FullPath) ?? string.Empty);
     }
 
     private void TrayMenuItem_Delete_OnClick(object sender, RoutedEventArgs e)
