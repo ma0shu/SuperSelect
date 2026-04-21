@@ -66,6 +66,41 @@ internal sealed class TrayRepository
         return added;
     }
 
+    public bool Contains(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        lock (_syncRoot)
+        {
+            if (_pathIndex.Contains(path))
+            {
+                return true;
+            }
+        }
+
+        var normalized = NormalizePath(path);
+        if (normalized is null)
+        {
+            return false;
+        }
+
+        lock (_syncRoot)
+        {
+            return _pathIndex.Contains(normalized);
+        }
+    }
+
+    public HashSet<string> GetPathIndexSnapshot()
+    {
+        lock (_syncRoot)
+        {
+            return new HashSet<string>(_pathIndex, StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
     public bool Remove(string path)
     {
         var normalized = NormalizePath(path);
@@ -218,6 +253,7 @@ internal sealed class TrayRepository
                     SecondaryText = Path.GetDirectoryName(path) ?? string.Empty,
                     IsDirectory = Directory.Exists(path),
                     Source = CandidateSource.Tray,
+                    IsTrayPinned = true,
                 });
         }
 

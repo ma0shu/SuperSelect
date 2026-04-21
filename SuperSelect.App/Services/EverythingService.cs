@@ -63,6 +63,19 @@ internal sealed class EverythingService
             cancellationToken);
     }
 
+    public Task<IReadOnlyList<FileCandidate>> SearchEntriesAsync(
+        string keyword,
+        EverythingSortOption sortOption,
+        int maxResults,
+        CancellationToken cancellationToken)
+    {
+        var query = string.IsNullOrWhiteSpace(keyword) ? string.Empty : keyword.Trim();
+
+        return Task.Run(
+            () => QueryInternalMixed(query, ToEverythingSort(sortOption), maxResults, CandidateSource.EverythingSearch, cancellationToken),
+            cancellationToken);
+    }
+
     public Task<IReadOnlyList<FileCandidate>> RecentFilesAsync(
         EverythingSortOption sortOption,
         int maxResults,
@@ -150,6 +163,22 @@ internal sealed class EverythingService
             cancellationToken: cancellationToken);
     }
 
+    private IReadOnlyList<FileCandidate> QueryInternalMixed(
+        string query,
+        uint sortType,
+        int maxResults,
+        CandidateSource source,
+        CancellationToken cancellationToken)
+    {
+        return QueryPageInternalMixed(
+            query,
+            sortType,
+            offset: 0,
+            maxResults: maxResults,
+            source: source,
+            cancellationToken: cancellationToken);
+    }
+
     private IReadOnlyList<FileCandidate> QueryPageInternal(
         string query,
         uint sortType,
@@ -220,6 +249,100 @@ internal sealed class EverythingService
                             DisplayName = displayName,
                             SecondaryText = Path.GetDirectoryName(fullPath) ?? string.Empty,
                             IsDirectory = isDirectoryResult,
+                            Source = source,
+                        });
+                }
+
+                return result;
+            }
+            catch (DllNotFoundException)
+            {
+                SetUnavailableLocked("Everything64.dll 未找到。请把 SDK DLL 放到可执行程序目录，或加入系统 PATH。");
+                return [];
+            }
+            catch (EntryPointNotFoundException)
+            {
+                SetUnavailableLocked("Everything SDK 接口不可用。请确认 DLL 版本与程序架构一致（x64）。");
+                return [];
+            }
+            catch (Exception ex)
+            {
+                _lastErrorMessage = ex.Message;
+                return [];
+            }
+        }
+    }
+
+    private IReadOnlyList<FileCandidate> QueryPageInternalMixed(
+        string query,
+        uint sortType,
+        int offset,
+        int maxResults,
+        CandidateSource source,
+        CancellationToken cancellationToken)
+    {
+        var boundedOffset = Math.Max(0, offset);
+        var boundedMaxResults = Math.Clamp(maxResults, 1, 20000);
+
+        lock (_syncRoot)
+        {
+            if (!EnsureAvailableLocked())
+            {
+                return [];
+            }
+
+            try
+            {
+                Native.Everything_SetMatchPath(false);
+                Native.Everything_SetMatchCase(false);
+                Native.Everything_SetRegex(false);
+                Native.Everything_SetRequestFlags(RequestFlags.FullPathAndFileName);
+                Native.Everything_SetSort(sortType);
+                Native.Everything_SetOffset((uint)boundedOffset);
+                Native.Everything_SetMax((uint)boundedMaxResults);
+                Native.Everything_SetSearchW(query);
+
+                if (!Native.Everything_QueryW(true))
+                {
+                    var errorCode = Native.Everything_GetLastError();
+                    _lastErrorMessage = $"查询失败（错误码: {errorCode}）";
+                    return [];
+                }
+
+                var count = (int)Native.Everything_GetNumResults();
+                var result = new List<FileCandidate>(Math.Min(count, boundedMaxResults));
+                var builder = GetPathBuilder();
+
+                for (var i = 0; i < count; i++)
+                {
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        return [];
+                    }
+
+                    builder.Clear();
+                    Native.Everything_GetResultFullPathNameW((uint)i, builder, (uint)builder.Capacity);
+
+                    var fullPath = builder.ToString();
+                    if (string.IsNullOrWhiteSpace(fullPath))
+                    {
+                        continue;
+                    }
+
+                    var displayName = Path.GetFileName(fullPath);
+                    if (string.IsNullOrWhiteSpace(displayName))
+                    {
+                        displayName = fullPath;
+                    }
+
+                    var isDirectory = Native.Everything_IsFolderResult((uint)i);
+                    result.Add(
+                        new FileCandidate
+                        {
+                            FullPath = fullPath,
+                            DisplayName = displayName,
+                            SecondaryText = Path.GetDirectoryName(fullPath) ?? string.Empty,
+                            IsDirectory = isDirectory,
                             Source = source,
                         });
                 }
@@ -476,6 +599,10 @@ internal sealed class EverythingService
 
         [DllImport("Everything64.dll")]
         internal static extern uint Everything_GetNumResults();
+
+        [DllImport("Everything64.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool Everything_IsFolderResult(uint index);
 
         [DllImport("Everything64.dll", CharSet = CharSet.Unicode)]
         internal static extern void Everything_GetResultFullPathNameW(uint index, StringBuilder result, uint maxCount);

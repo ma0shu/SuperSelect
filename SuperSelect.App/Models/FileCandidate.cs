@@ -33,6 +33,7 @@ internal sealed class FileCandidate
     public string SecondaryText { get; init; } = string.Empty;
     public bool IsDirectory { get; init; }
     public CandidateSource Source { get; init; }
+    public bool IsTrayPinned { get; init; }
 
     public string SourceLabel => Source switch
     {

@@ -87,6 +87,8 @@ public partial class OverlayWindow : Window
     private NativeMethods.RECT _lastDialogVisualRect;
     private Visibility _lastMeasuredStatusVisibility = Visibility.Collapsed;
     private Visibility _lastMeasuredSummaryVisibility = Visibility.Collapsed;
+    private int _trayStarToggleInFlight;
+    private int _deferredHeightRecalcQueued;
 
     internal OverlayWindow(
         EverythingService everythingService,
@@ -460,9 +462,10 @@ public partial class OverlayWindow : Window
 
         var (initialFilteredItems, initialStatus) = ApplyTypeFilter(initialOutcome.Value.Items, initialOutcome.Value.StatusMessage, initialOutcome.Value.CanApplyTypeFilter);
         var (initialDisplayItems, initialTrimmed) = CapDisplayItems(initialFilteredItems);
+        var initialDisplayItemsWithTray = ApplyTrayPinnedState(initialDisplayItems);
         SetStatus(BuildStatusForMode(mode, initialStatus, initialTrimmed, expandedScan: false));
-        UpdateSearchResultSummary(mode, initialDisplayItems.Count);
-        UpdateItems(initialDisplayItems);
+        UpdateSearchResultSummary(mode, initialDisplayItemsWithTray.Count);
+        UpdateItems(initialDisplayItemsWithTray);
 
         var expandedLimit = IsTypeFilterActive ? ExpandedTypeFilterQueryResultLimit : ExpandedQueryResultLimit;
         var shouldExpand =
@@ -484,6 +487,7 @@ public partial class OverlayWindow : Window
         if (IsTypeFilterActive &&
             initialOutcome.Value.CanApplyTypeFilter &&
             mode is OverlayMode.Search or OverlayMode.Recent &&
+            !(mode == OverlayMode.Search && !_isFolderDialog) &&
             _dialogController is not null)
         {
             var allowedExtensions = _dialogController.GetAllowedFileExtensions(_lastFileTypeFilterText);
@@ -498,9 +502,10 @@ public partial class OverlayWindow : Window
 
                 if (pagedOutcome is not null && !IsRefreshObsolete(requestVersion, token))
                 {
+                    var pagedItemsWithTray = ApplyTrayPinnedState(pagedOutcome.Value.Items);
                     SetStatus(BuildStatusForMode(mode, pagedOutcome.Value.StatusMessage, trimmed: false, expandedScan: true));
-                    UpdateSearchResultSummary(mode, pagedOutcome.Value.Items.Count);
-                    UpdateItems(pagedOutcome.Value.Items);
+                    UpdateSearchResultSummary(mode, pagedItemsWithTray.Count);
+                    UpdateItems(pagedItemsWithTray);
                 }
 
                 return;
@@ -515,9 +520,10 @@ public partial class OverlayWindow : Window
 
         var (expandedFilteredItems, expandedStatus) = ApplyTypeFilter(expandedOutcome.Value.Items, expandedOutcome.Value.StatusMessage, expandedOutcome.Value.CanApplyTypeFilter);
         var (expandedDisplayItems, expandedTrimmed) = CapDisplayItems(expandedFilteredItems);
+        var expandedDisplayItemsWithTray = ApplyTrayPinnedState(expandedDisplayItems);
         SetStatus(BuildStatusForMode(mode, expandedStatus, expandedTrimmed, expandedScan: true));
-        UpdateSearchResultSummary(mode, expandedDisplayItems.Count);
-        UpdateItems(expandedDisplayItems);
+        UpdateSearchResultSummary(mode, expandedDisplayItemsWithTray.Count);
+        UpdateItems(expandedDisplayItemsWithTray);
     }
 
     private async Task<(IReadOnlyList<FileCandidate> Items, string? StatusMessage)?> QueryTypeFilteredCandidatesByPagingAsync(
@@ -613,7 +619,7 @@ public partial class OverlayWindow : Window
                 case OverlayMode.Search:
                     items = _isFolderDialog
                         ? await _everythingService.SearchFoldersAsync(keyword, sort, resultLimit, token)
-                        : await _everythingService.SearchFilesAsync(keyword, sort, resultLimit, token);
+                        : await _everythingService.SearchEntriesAsync(keyword, sort, resultLimit, token);
 
                     caption = _isFolderDialog ? "文件夹搜索" : "搜索";
                     if (!_everythingService.IsAvailable)
@@ -718,6 +724,85 @@ public partial class OverlayWindow : Window
         }
 
         return (items.Take(DisplayResultLimit).ToList(), true);
+    }
+
+    private IReadOnlyList<FileCandidate> ApplyTrayPinnedState(IReadOnlyList<FileCandidate> items)
+    {
+        if (items.Count == 0)
+        {
+            return items;
+        }
+
+        var pinnedPaths = _trayRepository.GetPathIndexSnapshot();
+        List<FileCandidate>? updated = null;
+        for (var i = 0; i < items.Count; i++)
+        {
+            var candidate = items[i];
+            var isPinned = candidate.IsTrayPinned || IsPathPinned(pinnedPaths, candidate.FullPath);
+            if (isPinned == candidate.IsTrayPinned)
+            {
+                continue;
+            }
+
+            updated ??= new List<FileCandidate>(items.Count);
+            for (var j = 0; j < i; j++)
+            {
+                updated.Add(items[j]);
+            }
+
+            updated.Add(
+                new FileCandidate
+                {
+                    FullPath = candidate.FullPath,
+                    DisplayName = candidate.DisplayName,
+                    SecondaryText = candidate.SecondaryText,
+                    IsDirectory = candidate.IsDirectory,
+                    Source = candidate.Source,
+                    IsTrayPinned = isPinned,
+                });
+
+            for (var j = i + 1; j < items.Count; j++)
+            {
+                var remaining = items[j];
+                updated.Add(
+                    new FileCandidate
+                    {
+                        FullPath = remaining.FullPath,
+                        DisplayName = remaining.DisplayName,
+                        SecondaryText = remaining.SecondaryText,
+                        IsDirectory = remaining.IsDirectory,
+                        Source = remaining.Source,
+                        IsTrayPinned = remaining.IsTrayPinned || IsPathPinned(pinnedPaths, remaining.FullPath),
+                    });
+            }
+
+            break;
+        }
+
+        return updated ?? items;
+    }
+
+    private static bool IsPathPinned(IReadOnlySet<string> pinnedPaths, string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        if (pinnedPaths.Contains(path))
+        {
+            return true;
+        }
+
+        try
+        {
+            var normalized = Path.GetFullPath(path.Trim().Trim('"'));
+            return pinnedPaths.Contains(normalized);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static string? BuildStatus(string? statusMessage, bool trimmed, bool expandedScan)
@@ -842,6 +927,7 @@ public partial class OverlayWindow : Window
         if (shouldRecalculateHeight)
         {
             RecalculateWindowHeight();
+            QueueDeferredHeightRecalculation();
         }
 
         if (changed ||
@@ -858,13 +944,49 @@ public partial class OverlayWindow : Window
         UpdateLayout();
 
         var desiredHeight = ActualHeight;
+        if (ResultHost.Visibility == Visibility.Visible &&
+            _items.Count > 0 &&
+            desiredHeight < CompactHeightDip)
+        {
+            desiredHeight = CompactHeightDip;
+        }
+
         SizeToContent = SizeToContent.Manual;
-        Height = desiredHeight > ExpandedHeightDip
-            ? ExpandedHeightDip
-            : desiredHeight;
+        Height = Math.Clamp(desiredHeight, UltraCompactHeightDip, ExpandedHeightDip);
 
         _lastMeasuredStatusVisibility = StatusText.Visibility;
         _lastMeasuredSummaryVisibility = ResultSummaryText.Visibility;
+    }
+
+    private void QueueDeferredHeightRecalculation()
+    {
+        if (!IsVisible)
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref _deferredHeightRecalcQueued, 1, 0) != 0)
+        {
+            return;
+        }
+
+        _ = Dispatcher.BeginInvoke(
+            DispatcherPriority.Loaded,
+            new Action(() =>
+            {
+                _ = Interlocked.Exchange(ref _deferredHeightRecalcQueued, 0);
+                if (!IsVisible || _dialogHwnd == IntPtr.Zero)
+                {
+                    return;
+                }
+
+                var previousHeight = Height;
+                RecalculateWindowHeight();
+                if (Math.Abs(previousHeight - Height) > 0.5)
+                {
+                    RequestPositionUpdate();
+                }
+            }));
     }
 
     private void PositionToDialog()
@@ -907,7 +1029,9 @@ public partial class OverlayWindow : Window
                     out var extRect,
                     Marshal.SizeOf(typeof(NativeMethods.RECT))) == 0 &&
                 extRect.Width > 0 &&
-                extRect.Height > 0)
+                extRect.Height > 0 &&
+                extRect.Width >= Math.Max(1, windowRect.Width / 2) &&
+                extRect.Height >= Math.Max(1, windowRect.Height / 2))
             {
                 rect = extRect;
             }
@@ -933,8 +1057,8 @@ public partial class OverlayWindow : Window
         var maxWidthPx = DipToPx(1400, scale);
         var desiredWidthPx = Math.Clamp(rect.Width, minWidthPx, maxWidthPx);
 
-        var desiredHeightPx = DipToPx(Height, scale);
         var minUsableHeightPx = DipToPx(MinUsableHeightDip, scale);
+        var desiredHeightPx = Math.Max(minUsableHeightPx, DipToPx(Math.Max(Height, UltraCompactHeightDip), scale));
 
         var monitor = NativeMethods.MonitorFromWindow(_dialogHwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
         var workArea = GetWorkArea(monitor, rect);
@@ -947,17 +1071,29 @@ public partial class OverlayWindow : Window
 
         desiredLeftPx = Math.Max(workArea.Left, desiredLeftPx);
 
+        var workAreaHeightPx = Math.Max(1, workArea.Bottom - workArea.Top);
+        var maxHeightPx = Math.Max(minUsableHeightPx, workAreaHeightPx);
+        var targetHeightPx = Math.Clamp(desiredHeightPx, minUsableHeightPx, maxHeightPx);
+
         var desiredTopPx = rect.Bottom + OverlayGapPx;
-        var maxTopPx = workArea.Bottom - minUsableHeightPx;
-        if (desiredTopPx > maxTopPx)
+        if (desiredTopPx + targetHeightPx > workArea.Bottom)
         {
-            desiredTopPx = maxTopPx;
+            desiredTopPx = workArea.Bottom - targetHeightPx;
         }
 
-        desiredTopPx = Math.Max(workArea.Top, desiredTopPx);
+        if (desiredTopPx < workArea.Top)
+        {
+            desiredTopPx = workArea.Top;
+        }
 
-        var availableHeightPx = workArea.Bottom - desiredTopPx;
-        var finalHeightPx = Math.Max(1, Math.Min(desiredHeightPx, availableHeightPx));
+        var availableHeightPx = Math.Max(1, workArea.Bottom - desiredTopPx);
+        var finalHeightPx = Math.Min(targetHeightPx, availableHeightPx);
+        if (finalHeightPx < minUsableHeightPx && workAreaHeightPx >= minUsableHeightPx)
+        {
+            finalHeightPx = minUsableHeightPx;
+            desiredTopPx = Math.Max(workArea.Top, workArea.Bottom - finalHeightPx);
+        }
+
         var finalHeightDip = PxToDip(finalHeightPx, scale);
 
         UpdateResultHostHeight(finalHeightDip);
@@ -1246,6 +1382,13 @@ public partial class OverlayWindow : Window
 
     private void ResultList_OnMouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
+        if (e.OriginalSource is DependencyObject source &&
+            FindAncestor<System.Windows.Controls.Primitives.ButtonBase>(source) is not null)
+        {
+            e.Handled = true;
+            return;
+        }
+
         if (ResultList.SelectedItem is FileCandidate candidate)
         {
             _ = ExecuteConfirmAsync(candidate);
@@ -1662,6 +1805,13 @@ public partial class OverlayWindow : Window
 
     private void ListBoxItem_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
+        if (e.OriginalSource is DependencyObject source &&
+            FindAncestor<System.Windows.Controls.Primitives.ButtonBase>(source) is not null)
+        {
+            e.Handled = true;
+            return;
+        }
+
         if (sender is not ListBoxItem { DataContext: FileCandidate candidate })
         {
             return;
@@ -1674,6 +1824,128 @@ public partial class OverlayWindow : Window
 
         _ = ExecuteConfirmAsync(candidate);
         e.Handled = true;
+    }
+
+    private async void ItemStarButton_OnClick(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+
+        if (sender is not System.Windows.Controls.Button { DataContext: FileCandidate candidate })
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref _trayStarToggleInFlight, 1, 0) != 0)
+        {
+            return;
+        }
+
+        var targetPinned = !candidate.IsTrayPinned;
+        var changed = false;
+        try
+        {
+            if (candidate.IsTrayPinned)
+            {
+                changed = await Task.Run(() => _trayRepository.Remove(candidate.FullPath));
+                SetStatus(changed
+                    ? $"已移出托盘：{candidate.DisplayName}"
+                    : "该项不在托盘中。");
+            }
+            else
+            {
+                var added = await Task.Run(() => _trayRepository.AddMany([candidate.FullPath]));
+                changed = added > 0;
+                SetStatus(added > 0
+                    ? $"已加入托盘：{candidate.DisplayName}"
+                    : "该项已在托盘中。");
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogException(
+                "OverlayWindow.ItemStarButton_OnClick",
+                ex,
+                throttle: TimeSpan.FromSeconds(2));
+            SetStatus("托盘更新失败。");
+            return;
+        }
+        finally
+        {
+            _ = Interlocked.Exchange(ref _trayStarToggleInFlight, 0);
+        }
+
+        if (changed)
+        {
+            if (_currentMode == OverlayMode.Tray && !targetPinned)
+            {
+                RemovePathFromVisibleItems(candidate.FullPath);
+            }
+            else
+            {
+                ApplyTrayPinStateToVisibleItems(candidate.FullPath, targetPinned);
+            }
+        }
+
+        e.Handled = true;
+    }
+
+    private void RemovePathFromVisibleItems(string fullPath)
+    {
+        if (string.IsNullOrWhiteSpace(fullPath) || _items.Count == 0)
+        {
+            return;
+        }
+
+        var remaining = new List<FileCandidate>(_items.Count);
+        for (var i = 0; i < _items.Count; i++)
+        {
+            var current = _items[i];
+            if (!string.Equals(current.FullPath, fullPath, StringComparison.OrdinalIgnoreCase))
+            {
+                remaining.Add(current);
+            }
+        }
+
+        if (remaining.Count == _items.Count)
+        {
+            return;
+        }
+
+        UpdateItems(remaining);
+    }
+
+    private void ApplyTrayPinStateToVisibleItems(string fullPath, bool isPinned)
+    {
+        var updatedAny = false;
+        for (var i = 0; i < _items.Count; i++)
+        {
+            var current = _items[i];
+            if (!string.Equals(current.FullPath, fullPath, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (current.IsTrayPinned == isPinned)
+            {
+                continue;
+            }
+
+            _items[i] = new FileCandidate
+            {
+                FullPath = current.FullPath,
+                DisplayName = current.DisplayName,
+                SecondaryText = current.SecondaryText,
+                IsDirectory = current.IsDirectory,
+                Source = current.Source,
+                IsTrayPinned = isPinned,
+            };
+            updatedAny = true;
+        }
+
+        if (updatedAny && ResultList.SelectedItem is null && _items.Count > 0)
+        {
+            ResultList.SelectedIndex = 0;
+        }
     }
 
     private void TrayMenuItem_Pin_OnClick(object sender, RoutedEventArgs e)
@@ -1859,7 +2131,8 @@ public partial class OverlayWindow : Window
     {
         return string.Equals(left.FullPath, right.FullPath, StringComparison.OrdinalIgnoreCase) &&
                left.IsDirectory == right.IsDirectory &&
-               left.Source == right.Source;
+               left.Source == right.Source &&
+               left.IsTrayPinned == right.IsTrayPinned;
     }
 
     private static T? FindDescendant<T>(DependencyObject root) where T : DependencyObject
@@ -1878,6 +2151,42 @@ public partial class OverlayWindow : Window
             {
                 return nested;
             }
+        }
+
+        return null;
+    }
+
+    private static T? FindAncestor<T>(DependencyObject? child) where T : DependencyObject
+    {
+        var current = child;
+        while (current is not null)
+        {
+            if (current is T typed)
+            {
+                return typed;
+            }
+
+            current = GetParentObject(current);
+        }
+
+        return null;
+    }
+
+    private static DependencyObject? GetParentObject(DependencyObject child)
+    {
+        if (child is Visual || child is System.Windows.Media.Media3D.Visual3D)
+        {
+            return VisualTreeHelper.GetParent(child);
+        }
+
+        if (child is FrameworkContentElement contentElement)
+        {
+            return contentElement.Parent;
+        }
+
+        if (child is FrameworkElement frameworkElement)
+        {
+            return frameworkElement.Parent;
         }
 
         return null;
